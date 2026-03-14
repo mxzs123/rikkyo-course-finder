@@ -69,6 +69,18 @@
     .search-grid { grid-template-columns: 1fr; }
     .container { padding: 12px; }
     .search-panel { padding: 16px; }
+    .modal-overlay { padding: 20px 8px; }
+    .modal-body { padding: 16px 12px; }
+    .modal-body .detail-row {
+      grid-template-columns: 1fr;
+      gap: 2px;
+    }
+    .modal-body .detail-label {
+      font-size: 12px;
+    }
+    .modal-body .detail-value {
+      font-size: 13px;
+    }
   }
 
   .field { display: flex; flex-direction: column; gap: 4px; }
@@ -369,11 +381,16 @@
     padding: 40px;
     color: var(--text-light);
   }
+  .detail-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 4px 0;
+  }
   .detail-table {
     width: 100%;
     border-collapse: collapse;
-    margin: 4px 0;
     font-size: 13px;
+    min-width: 480px;
   }
   .detail-table th {
     background: var(--purple-bg);
@@ -382,6 +399,7 @@
     text-align: left;
     font-weight: 600;
     border-bottom: 2px solid var(--purple);
+    white-space: nowrap;
   }
   .detail-table td {
     padding: 8px 12px;
@@ -1258,13 +1276,13 @@ async function showDetail(code, name) {
     body.innerHTML = Object.entries(data).map(([key, value]) => {
       let valueHtml;
       if (typeof value === "object" && value !== null && value.type === "table") {
-        let table = '<table class="detail-table">';
+        let table = '<div class="detail-table-wrap"><table class="detail-table">';
         if (value.headers && value.headers.length) {
           table += '<thead><tr>' + value.headers.map(header => `<th>${header}</th>`).join("") + '</tr></thead>';
         }
         table += '<tbody>' + (value.rows || []).map(row =>
           '<tr>' + row.map(cell => `<td>${cell}</td>`).join("") + '</tr>'
-        ).join("") + '</tbody></table>';
+        ).join("") + '</tbody></table></div>';
         if (value.note) {
           table += `<div class="detail-note">${value.note}</div>`;
         }
