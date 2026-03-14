@@ -382,15 +382,12 @@
     color: var(--text-light);
   }
   .detail-table-wrap {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
     margin: 4px 0;
   }
   .detail-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
-    min-width: 480px;
   }
   .detail-table th {
     background: var(--purple-bg);
@@ -413,6 +410,38 @@
     font-size: 12px;
     color: var(--text-light);
     white-space: pre-wrap;
+  }
+
+  @media (max-width: 768px) {
+    .detail-table thead { display: none; }
+    .detail-table, .detail-table tbody, .detail-table tr, .detail-table td {
+      display: block;
+      width: 100%;
+    }
+    .detail-table tr {
+      background: var(--gray-bg);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      border: 1px solid var(--border);
+    }
+    .detail-table td {
+      padding: 3px 0;
+      border-bottom: none;
+      display: block;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .detail-table td:before {
+      content: attr(data-label);
+      display: block;
+      font-weight: 600;
+      color: var(--purple);
+      font-size: 11px;
+      margin-bottom: 1px;
+    }
+    .detail-table td[data-label=""]:before { display: none; }
+    .detail-table td:empty { display: none; }
   }
 
   .eval-tag {
@@ -1276,12 +1305,16 @@ async function showDetail(code, name) {
     body.innerHTML = Object.entries(data).map(([key, value]) => {
       let valueHtml;
       if (typeof value === "object" && value !== null && value.type === "table") {
+        const headers = value.headers || [];
         let table = '<div class="detail-table-wrap"><table class="detail-table">';
-        if (value.headers && value.headers.length) {
-          table += '<thead><tr>' + value.headers.map(header => `<th>${header}</th>`).join("") + '</tr></thead>';
+        if (headers.length) {
+          table += '<thead><tr>' + headers.map(header => `<th>${header}</th>`).join("") + '</tr></thead>';
         }
         table += '<tbody>' + (value.rows || []).map(row =>
-          '<tr>' + row.map(cell => `<td>${cell}</td>`).join("") + '</tr>'
+          '<tr>' + row.map((cell, i) => {
+            const label = headers[i] || '';
+            return `<td data-label="${label}">${cell}</td>`;
+          }).join("") + '</tr>'
         ).join("") + '</tbody></table></div>';
         if (value.note) {
           table += `<div class="detail-note">${value.note}</div>`;
