@@ -412,6 +412,38 @@
     white-space: pre-wrap;
   }
 
+  .detail-section {
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .detail-section summary {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--purple);
+    cursor: pointer;
+    user-select: none;
+    padding: 12px 16px;
+    background: var(--purple-bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-section[open] summary {
+    border-bottom: 2px solid var(--purple);
+  }
+  .detail-section .detail-section-body {
+    padding: 0 16px;
+  }
+  @media (max-width: 768px) {
+    .detail-section .detail-section-body {
+      padding: 0 8px;
+    }
+    .detail-section summary {
+      padding: 10px 12px;
+      font-size: 13px;
+    }
+  }
+
   @media (max-width: 768px) {
     .detail-table thead { display: none; }
     .detail-table, .detail-table tbody, .detail-table tr, .detail-table td {
@@ -1300,7 +1332,37 @@ async function showDetail(code, name) {
       return;
     }
 
-    body.innerHTML = Object.entries(data).map(([key, value]) => {
+    const tier1Keys = [
+      "成績評価方法・基準",
+      "学期",
+      "曜日時限・教室",
+      "校地",
+      "単位",
+      "履修登録方法",
+      "履修中止可否",
+      "授業形態"
+    ];
+    const tier2Keys = [
+      "授業の内容",
+      "授業の目標",
+      "Course Contents",
+      "Course Objectives",
+      "授業計画",
+      "授業時間外（予習・復習等）の学修",
+      "テキスト",
+      "参考文献"
+    ];
+
+    function isFieldEmpty(value) {
+      if (value === null || value === undefined) return true;
+      if (typeof value === "string") return value.trim() === "";
+      if (typeof value === "object" && value.type === "table") {
+        return !value.rows || value.rows.length === 0;
+      }
+      return false;
+    }
+
+    function renderDetailField(key, value) {
       let valueHtml;
       if (typeof value === "object" && value !== null && value.type === "table") {
         const headers = value.headers || [];
@@ -1308,12 +1370,15 @@ async function showDetail(code, name) {
         if (headers.length) {
           table += '<thead><tr>' + headers.map(header => `<th>${header}</th>`).join("") + '</tr></thead>';
         }
-        table += '<tbody>' + (value.rows || []).map(row =>
-          '<tr>' + row.map((cell, i) => {
+        table += '<tbody>' + (value.rows || []).map(row => {
+          if (row.length === 1 && headers.length > 1) {
+            return `<tr><td colspan="${headers.length}" data-label="">${row[0]}</td></tr>`;
+          }
+          return '<tr>' + row.map((cell, i) => {
             const label = headers[i] || '';
             return `<td data-label="${label}">${cell}</td>`;
-          }).join("") + '</tr>'
-        ).join("") + '</tbody></table></div>';
+          }).join("") + '</tr>';
+        }).join("") + '</tbody></table></div>';
         if (value.note) {
           table += `<div class="detail-note">${value.note}</div>`;
         }
@@ -1322,7 +1387,63 @@ async function showDetail(code, name) {
         valueHtml = value;
       }
       return `<div class="detail-row"><div class="detail-label">${key}</div><div class="detail-value">${valueHtml}</div></div>`;
-    }).join("");
+    }
+
+    function matchesTier(key, tierKeys) {
+      return tierKeys.some(tk => key.startsWith(tk));
+    }
+
+    const entries = Object.entries(data);
+    const tier1Entries = [];
+    const tier2Entries = [];
+    const tier3Entries = [];
+
+    // Sort entries into tiers based on prefix matching
+    entries.forEach(([key, value]) => {
+      if (isFieldEmpty(value)) return;
+      if (matchesTier(key, tier1Keys)) {
+        tier1Entries.push([key, value]);
+      } else if (matchesTier(key, tier2Keys)) {
+        tier2Entries.push([key, value]);
+      } else {
+        tier3Entries.push([key, value]);
+      }
+    });
+
+    // Re-sort tier1 entries to match the defined order
+    tier1Entries.sort((a, b) => {
+      const idxA = tier1Keys.findIndex(tk => a[0].startsWith(tk));
+      const idxB = tier1Keys.findIndex(tk => b[0].startsWith(tk));
+      return idxA - idxB;
+    });
+
+    // Re-sort tier2 entries to match the defined order
+    tier2Entries.sort((a, b) => {
+      const idxA = tier2Keys.findIndex(tk => a[0].startsWith(tk));
+      const idxB = tier2Keys.findIndex(tk => b[0].startsWith(tk));
+      return idxA - idxB;
+    });
+
+    let html = "";
+
+    // Tier 1: always visible
+    html += tier1Entries.map(([k, v]) => renderDetailField(k, v)).join("");
+
+    // Tier 2: collapsible
+    if (tier2Entries.length > 0) {
+      html += '<details class="detail-section"><summary>授業内容の詳細</summary><div class="detail-section-body">';
+      html += tier2Entries.map(([k, v]) => renderDetailField(k, v)).join("");
+      html += '</div></details>';
+    }
+
+    // Tier 3: collapsible
+    if (tier3Entries.length > 0) {
+      html += '<details class="detail-section"><summary>その他の情報</summary><div class="detail-section-body">';
+      html += tier3Entries.map(([k, v]) => renderDetailField(k, v)).join("");
+      html += '</div></details>';
+    }
+
+    body.innerHTML = html;
   } catch (e) {
     body.innerHTML = `<p style="color:red">通信エラー: ${e.message}</p>`;
   }
