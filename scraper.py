@@ -53,10 +53,14 @@ GAKUBU_MAP = {
     "33": "人工知能科学研究科", "29": "法務研究科",
 }
 
+GAKUBU_REVERSE = {v: k for k, v in GAKUBU_MAP.items() if k}
+
 BUNRUI19_MAP = {
     "": "全て", "1": "大学", "2": "大学院（前期課程）",
     "3": "大学院（後期課程）", "4": "学校・社会教育講座",
 }
+
+BUNRUI19_REVERSE = {v: k for k, v in BUNRUI19_MAP.items() if k}
 
 BUNRUI3_MAP = {
     "": "全て", "1": "対面（全回対面）", "2": "対面（一部オンライン）",
@@ -64,19 +68,37 @@ BUNRUI3_MAP = {
     "5": "オンデマンド（全回オンデマンド）", "7": "ハイフレックス", "6": "未定",
 }
 
+BUNRUI3_REVERSE = {v: k for k, v in BUNRUI3_MAP.items() if k}
+
 BUNRUI12_MAP = {
     "": "全て", "1": "池袋", "2": "新座", "3": "他",
 }
+
+BUNRUI12_REVERSE = {v: k for k, v in BUNRUI12_MAP.items() if k}
 
 BUNRUI2_MAP = {
     "": "全て", "1": "自動登録", "2": "科目コード登録", "3": "抽選登録",
     "6": "抽選他", "4": "その他登録", "7": "備考参照", "5": "未定",
 }
 
+BUNRUI2_REVERSE = {v: k for k, v in BUNRUI2_MAP.items() if k}
+
 EXAM_KEYWORDS = ("試験", "テスト", "exam", "test", "quiz", "midterm", "final", "中間", "期末")
 REPORT_KEYWORDS = ("レポート", "report", "essay", "paper")
 WRITTEN_EXAM_KEYWORDS = ("筆記試験", "written exam")
 IN_CLASS_KEYWORDS = ("平常点", "in-class", "attendance", "participation", "出席")
+
+
+# ---------------------------------------------------------------------------
+# Structured response wrappers (for AI / programmatic callers)
+# ---------------------------------------------------------------------------
+
+def _ok(data):
+    return {"ok": True, "data": data}
+
+
+def _err(code, message):
+    return {"ok": False, "error": code, "message": message}
 
 
 def _get_session():
@@ -562,3 +584,109 @@ def search_courses_page_with_evaluations(page=1, exam_filter="all", exam_max=100
         "max_page": page_result["max_page"],
         "courses": filtered_courses,
     }
+
+
+# ---------------------------------------------------------------------------
+# Human-readable parameter resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_with_reverse(value, reverse_map):
+    if not value:
+        return value
+    if value in reverse_map:
+        return reverse_map[value]
+    matches = [k for k in reverse_map if value in k]
+    if len(matches) == 1:
+        return reverse_map[matches[0]]
+    return value
+
+
+def resolve_params(**kwargs):
+    resolved = {}
+
+    param_aliases = {
+        "department": "gakubu",
+        "course_name": "kamokumei",
+        "teacher": "admin36_text",
+        "category": "bunrui19",
+        "format": "bunrui3",
+        "campus": "bunrui12",
+        "registration": "bunrui2",
+        "year": "nendo",
+        "course_code": "kodo_2",
+        "numbering": "kodo_1",
+    }
+
+    reverse_lookups = {
+        "gakubu": GAKUBU_REVERSE,
+        "bunrui19": BUNRUI19_REVERSE,
+        "bunrui3": BUNRUI3_REVERSE,
+        "bunrui12": BUNRUI12_REVERSE,
+        "bunrui2": BUNRUI2_REVERSE,
+    }
+
+    for key, value in kwargs.items():
+        upstream_key = param_aliases.get(key, key)
+        if upstream_key in reverse_lookups and isinstance(value, str):
+            resolved[upstream_key] = _resolve_with_reverse(value, reverse_lookups[upstream_key])
+        else:
+            resolved[upstream_key] = value
+
+    return resolved
+
+
+def easy_search(page=1, **kwargs):
+    params = resolve_params(**kwargs)
+    return search_courses(page=page, **params)
+
+
+def easy_search_with_evaluations(page=1, exam_filter="all", exam_max=100, report_min=0, **kwargs):
+    params = resolve_params(**kwargs)
+    return search_courses_page_with_evaluations(
+        page=page, exam_filter=exam_filter, exam_max=exam_max, report_min=report_min, **params
+    )
+
+
+# ---------------------------------------------------------------------------
+# Safe wrappers — structured responses for AI / programmatic callers
+# ---------------------------------------------------------------------------
+
+def safe_search(page=1, **kwargs):
+    """Search with structured response wrapper."""
+    try:
+        result = search_courses(page=page, **kwargs)
+        if result["total"] == 0:
+            return _ok({"total": 0, "courses": [], "max_page": 1, "note": "no_results"})
+        return _ok(result)
+    except requests.exceptions.RequestException as e:
+        return _err("network_error", str(e))
+    except Exception as e:
+        return _err("parse_error", str(e))
+
+
+def safe_detail(url=None, nendo=None, kodo_2=None):
+    """Get syllabus detail with structured response wrapper."""
+    try:
+        detail = get_syllabus_detail(url=url, nendo=nendo, kodo_2=kodo_2)
+        if not detail:
+            return _err("not_found", "Syllabus detail page returned no data")
+        return _ok(detail)
+    except requests.exceptions.RequestException as e:
+        return _err("network_error", str(e))
+    except Exception as e:
+        return _err("parse_error", str(e))
+
+
+def safe_search_with_evaluations(page=1, exam_filter="all", exam_max=100, report_min=0, **kwargs):
+    """Search with evaluation filters and structured response wrapper."""
+    try:
+        result = search_courses_page_with_evaluations(
+            page=page, exam_filter=exam_filter, exam_max=exam_max, report_min=report_min, **kwargs
+        )
+        if result["total"] == 0:
+            return _ok({"total": 0, "courses": [], "max_page": 1, "page": page, "note": "no_results"})
+        return _ok(result)
+    except requests.exceptions.RequestException as e:
+        return _err("network_error", str(e))
+    except Exception as e:
+        return _err("parse_error", str(e))

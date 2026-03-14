@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>立教大学 選課助手</title>
+<title>立教大学 履修サーチ</title>
 <style>
   :root {
     --purple: #582c83;
@@ -495,7 +495,7 @@
 
 <div class="header">
   <div>
-    <h1>立教大学 選課助手</h1>
+    <h1>立教大学 履修サーチ</h1>
     <div class="subtitle">Rikkyo Course Finder - Better Search for Syllabus</div>
   </div>
 </div>
@@ -620,12 +620,12 @@
             <option value="80">80%以上</option>
             <option value="100">100%</option>
           </select>
-          <label>結果排序：</label>
+          <label>並び替え：</label>
           <select id="evalSortMode" onchange="applyEvalSort()">
-            <option value="discover">发现顺序</option>
-            <option value="exam-desc">试验比例高到低</option>
-            <option value="report-desc">Report 比例高到低</option>
-            <option value="code-asc">课程代码顺序</option>
+            <option value="discover">発見順</option>
+            <option value="exam-desc">試験割合（高→低）</option>
+            <option value="report-desc">Report割合（高→低）</option>
+            <option value="code-asc">科目コード順</option>
           </select>
         </div>
         <div class="eval-progress" id="evalProgress" style="display:none;">
@@ -1147,10 +1147,10 @@ function renderResults(data, courses, rawCount) {
 
     const pageStart = (currentPage - 1) * PAGE_SIZE;
     const pageCourses = courses.slice(pageStart, pageStart + PAGE_SIZE);
-    const localFilteredText = rawCount !== courses.length ? ` / 当前显示${courses.length}件` : "";
+    const localFilteredText = rawCount !== courses.length ? ` / 表示${courses.length}件` : "";
     const statusText = progress.completed
       ? `評価条件で${rawCount}件 / 元検索${data.base_total}件`
-      : `已扫描${progress.pagesCompleted}/${progress.maxPage}页，已找到${rawCount}件 / 元検索${data.base_total}件`;
+      : `${progress.pagesCompleted}/${progress.maxPage}ページ取得済み・${rawCount}件ヒット / 元検索${data.base_total}件`;
 
     document.getElementById("emptyState").style.display = "none";
     panel.style.display = "block";
@@ -1158,7 +1158,7 @@ function renderResults(data, courses, rawCount) {
 
     if (pageCourses.length === 0) {
       body.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-light);">
-        ${progress.completed ? "这一页没有结果。" : "这一页的结果还在检索中，请稍候..."}
+        ${progress.completed ? "このページには結果がありません。" : "このページの結果を検索中です。しばらくお待ちください..."}
       </td></tr>`;
       renderPagination(data, courses.length);
       return;
