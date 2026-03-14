@@ -966,6 +966,8 @@ _FORMAT_KEYWORDS = {
 _SEMESTER_KEYWORDS = ["春学期", "秋学期", "通年"]
 
 _PARTICLES = re.compile(r"[のでははがをにと]+$")
+_NOISE_WORDS = re.compile(r"(キャンパス|授業|科目|講義|の|　)+")
+_WHITESPACE_COLLAPSE = re.compile(r"\s+")
 
 
 def parse_natural_query(query):
@@ -1040,12 +1042,11 @@ def parse_natural_query(query):
             remaining = remaining.replace("秋", "", 1)
 
     # --- Remaining text becomes kamokumei ---
-    # Strip particles and whitespace
     remaining = remaining.strip()
     remaining = _PARTICLES.sub("", remaining)
-    # Also strip leading particles
     remaining = re.sub(r"^[のでははがをにと]+", "", remaining)
-    remaining = remaining.strip()
+    remaining = _NOISE_WORDS.sub(" ", remaining)
+    remaining = _WHITESPACE_COLLAPSE.sub(" ", remaining).strip()
 
     if remaining:
         params["kamokumei"] = remaining
