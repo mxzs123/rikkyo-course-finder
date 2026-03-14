@@ -412,6 +412,94 @@
     white-space: pre-wrap;
   }
 
+  .detail-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+  .detail-featured {
+    border: 1px solid rgba(88,44,131,0.14);
+    border-left: 4px solid var(--purple);
+    border-radius: 10px;
+    padding: 16px;
+    background: linear-gradient(180deg, #faf6ff 0%, #fff 100%);
+  }
+  .detail-featured-kicker {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--purple-light);
+    margin-bottom: 6px;
+  }
+  .detail-featured-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--purple);
+    margin-bottom: 10px;
+  }
+  .detail-featured-body .detail-table-wrap {
+    margin: 0;
+  }
+  .detail-key-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .detail-key-item {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    background: var(--white);
+  }
+  .detail-key-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--purple);
+    margin-bottom: 4px;
+  }
+  .detail-key-value {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  @media (max-width: 768px) {
+    .detail-summary {
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .detail-featured {
+      padding: 12px;
+      border-radius: 8px;
+    }
+    .detail-featured-kicker {
+      font-size: 10px;
+    }
+    .detail-featured-title {
+      font-size: 15px;
+      margin-bottom: 8px;
+    }
+    .detail-key-grid {
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .detail-key-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+    }
+    .detail-key-label {
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    .detail-key-value {
+      font-size: 13px;
+      line-height: 1.45;
+    }
+  }
+
   .detail-section {
     margin-top: 16px;
     border: 1px solid var(--border);
@@ -1362,7 +1450,7 @@ async function showDetail(code, name) {
       return false;
     }
 
-    function renderDetailField(key, value) {
+    function renderDetailValue(value) {
       let valueHtml;
       if (typeof value === "object" && value !== null && value.type === "table") {
         const headers = value.headers || [];
@@ -1386,7 +1474,23 @@ async function showDetail(code, name) {
       } else {
         valueHtml = value;
       }
+      return valueHtml;
+    }
+
+    function renderDetailField(key, value) {
+      const valueHtml = renderDetailValue(value);
       return `<div class="detail-row"><div class="detail-label">${key}</div><div class="detail-value">${valueHtml}</div></div>`;
+    }
+
+    function renderFeaturedField(key, value) {
+      return `<section class="detail-featured"><div class="detail-featured-kicker">履修判断でまず見る情報</div><div class="detail-featured-title">${key}</div><div class="detail-featured-body">${renderDetailValue(value)}</div></section>`;
+    }
+
+    function renderKeySummary(entries) {
+      if (!entries.length) return "";
+      return `<div class="detail-key-grid">${entries.map(([key, value]) => {
+        return `<div class="detail-key-item"><div class="detail-key-label">${key}</div><div class="detail-key-value">${renderDetailValue(value)}</div></div>`;
+      }).join("")}</div>`;
     }
 
     function matchesTier(key, tierKeys) {
@@ -1426,8 +1530,17 @@ async function showDetail(code, name) {
 
     let html = "";
 
-    // Tier 1: always visible
-    html += tier1Entries.map(([k, v]) => renderDetailField(k, v)).join("");
+    const featuredEntry = tier1Entries.find(([key]) => key.startsWith("成績評価方法・基準"));
+    const summaryEntries = tier1Entries.filter(([key]) => !key.startsWith("成績評価方法・基準"));
+
+    if (featuredEntry || summaryEntries.length > 0) {
+      html += '<div class="detail-summary">';
+      if (featuredEntry) {
+        html += renderFeaturedField(featuredEntry[0], featuredEntry[1]);
+      }
+      html += renderKeySummary(summaryEntries);
+      html += '</div>';
+    }
 
     // Tier 2: collapsible
     if (tier2Entries.length > 0) {
