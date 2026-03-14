@@ -609,12 +609,12 @@
         <div class="eval-filter-chips">
           <span class="eval-chip active" data-eval="all" onclick="setEvalFilter('all')">全て</span>
           <span class="eval-chip" data-eval="no-exam" onclick="setEvalFilter('no-exam')">試験なし（100%平常点）</span>
-          <span class="eval-chip" data-eval="has-report" onclick="setEvalFilter('has-report')">含 Report</span>
+          <span class="eval-chip" data-eval="has-report" onclick="setEvalFilter('has-report')">Reportあり</span>
           <span class="eval-chip" data-eval="has-exam" onclick="setEvalFilter('has-exam')">試験あり</span>
         </div>
         <div class="eval-controls-row">
           <label>試験の割合上限：</label>
-          <select id="evalExamMax" onchange="applyEvalSlider()">
+          <select id="evalExamMax">
             <option value="100">制限なし</option>
             <option value="80">80%以下</option>
             <option value="60">60%以下</option>
@@ -623,7 +623,7 @@
             <option value="0">0%（試験なし）</option>
           </select>
           <label>Report 下限：</label>
-          <select id="evalReportMin" onchange="applyReportFilter()">
+          <select id="evalReportMin">
             <option value="0">制限なし</option>
             <option value="20">20%以上</option>
             <option value="40">40%以上</option>
@@ -632,7 +632,7 @@
             <option value="100">100%</option>
           </select>
           <label>並び替え：</label>
-          <select id="evalSortMode" onchange="applyEvalSort()">
+          <select id="evalSortMode">
             <option value="discover">発見順</option>
             <option value="exam-desc">試験割合（高→低）</option>
             <option value="report-desc">Report割合（高→低）</option>
@@ -1003,15 +1003,6 @@ function setEvalFilter(mode) {
   document.querySelectorAll(".eval-chip").forEach(chip => {
     chip.classList.toggle("active", chip.dataset.eval === mode);
   });
-  if (lastResults) doSearch(1);
-}
-
-function applyEvalSlider() {
-  if (lastResults) doSearch(1);
-}
-
-function applyReportFilter() {
-  if (lastResults) doSearch(1);
 }
 
 function applyEvalSort() {
