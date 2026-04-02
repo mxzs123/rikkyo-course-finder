@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from scraper import (
     easy_search,
     easy_search_with_evaluations,
-    get_syllabus_detail,
+    get_structured_syllabus_detail,
     search_and_detail_parallel,
     GAKUBU_MAP,
     BUNRUI19_MAP,
@@ -163,10 +163,10 @@ def get_detail(code: str, year: str = "2025") -> str:
         code: Course code / 科目コード (required).
         year: Academic year / 年度 (default "2025").
 
-    Returns JSON with all syllabus sections: objectives, schedule, evaluation, etc.
+    Returns JSON with stable top-level keys plus `detail_fields` / `raw_detail`.
     """
     try:
-        detail = get_syllabus_detail(nendo=year, kodo_2=code)
+        detail = get_structured_syllabus_detail(nendo=year, kodo_2=code)
         if not detail:
             return _json({"ok": False, "error": "not_found", "message": "No syllabus data found for this course."})
         return _json({"ok": True, "data": detail})
@@ -198,7 +198,7 @@ def search_and_get_details(
         top_n: Number of top results to fetch full details for (default 5).
         (other params same as search_courses)
 
-    Returns JSON with courses enriched with full syllabus data in the 'syllabus' field.
+    Returns JSON with search-style course rows enriched by structured detail fields.
     """
     try:
         result = search_and_detail_parallel(

@@ -1,14 +1,21 @@
+import copy
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 BASE_URL = "https://sy.rikkyo.ac.jp/web"
 SEARCH_URL = f"{BASE_URL}/web_search_show.php"
 DEFAULT_TIMEOUT = 30
 SEARCH_PAGE_SIZE = 20
+UPSTREAM_RETRY_COUNT = 3
+UPSTREAM_RETRY_BACKOFF = 0.5
+RETRYABLE_STATUS_CODES = (408, 429, 500, 502, 503, 504)
 
 _thread_local = threading.local()
 
@@ -17,6 +24,8 @@ _eval_cache = {}
 _eval_cache_lock = threading.Lock()
 _search_cache = {}
 _search_cache_lock = threading.Lock()
+_detail_bundle_cache = {}
+_detail_bundle_cache_lock = threading.Lock()
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -87,6 +96,67 @@ EXAM_KEYWORDS = ("試験", "テスト", "exam", "test", "quiz", "midterm", "fina
 REPORT_KEYWORDS = ("レポート", "report", "essay", "paper")
 WRITTEN_EXAM_KEYWORDS = ("筆記試験", "written exam")
 IN_CLASS_KEYWORDS = ("平常点", "in-class", "attendance", "participation", "出席")
+TEST_LIKE_KEYWORDS = (
+    "小テスト", "テスト", "quiz", "midterm", "中間", "期末", "最終試験", "中間試験",
+    "期末試験", "筆記試験", "口頭試問", "exam", "試験",
+)
+PRESENTATION_KEYWORDS = ("発表", "プレゼン", "presentation", "口頭発表")
+REPORT_ONLY_PATTERNS = (
+    r"レポート試験",
+    r"report exam",
+    r"final report",
+    r"最終レポート",
+)
+CURRICULUM_LABEL_PATTERNS = (
+    r"学びの精神(?:科目)?",
+    r"多彩な学び(?:全学共通カリキュラム)?",
+    r"主題別[A-ZＡ-Ｚ]",
+    r"基幹[A-ZＡ-Ｚ0-9０-９]+",
+    r"指定[A-ZＡ-Ｚ][0-9０-９]+",
+)
+
+DETAIL_FIELD_ALIASES = {
+    "科目コード": "code",
+    "科目ナンバリング": "numbering",
+    "科目名": "name",
+    "担当教員": "teacher",
+    "教員名": "teacher",
+    "学期": "semester",
+    "曜日時限": "schedule",
+    "曜日時限・教室": "schedule",
+    "校地": "campus",
+    "単位": "credits",
+    "履修登録方法": "reg_method",
+    "履修中止可否": "withdrawal_available",
+    "授業形態": "format",
+    "成績評価方法・基準": "evaluation_method",
+    "注意事項": "notice",
+    "授業の内容": "course_contents",
+    "Course Contents": "course_contents",
+    "授業の目標": "course_objectives",
+    "Course Objectives": "course_objectives",
+    "授業計画": "course_plan",
+    "授業時間外（予習・復習等）の学修": "out_of_class_study",
+    "テキスト": "textbook",
+    "参考文献": "references",
+}
+
+STRUCTURED_DETAIL_SUMMARY_KEYS = (
+    "code",
+    "numbering",
+    "name",
+    "teacher",
+    "semester",
+    "schedule",
+    "campus",
+    "credits",
+    "reg_method",
+    "withdrawal_available",
+    "format",
+    "curriculum",
+    "curriculum_text",
+    "notice",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -101,29 +171,65 @@ def _err(code, message):
     return {"ok": False, "error": code, "message": message}
 
 
+class UpstreamRequestError(requests.exceptions.RequestException):
+    pass
+
+
 def _get_session():
     session = getattr(_thread_local, "session", None)
     if session is None:
+        retry = Retry(
+            total=UPSTREAM_RETRY_COUNT,
+            connect=UPSTREAM_RETRY_COUNT,
+            read=UPSTREAM_RETRY_COUNT,
+            status=UPSTREAM_RETRY_COUNT,
+            backoff_factor=UPSTREAM_RETRY_BACKOFF,
+            status_forcelist=RETRYABLE_STATUS_CODES,
+            allowed_methods=None,
+            raise_on_status=False,
+            respect_retry_after_header=True,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
         session = requests.Session()
         session.headers.update(HEADERS)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         _thread_local.session = session
     return session
 
 
+def _is_retryable_request_exception(exc):
+    if isinstance(exc, (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.RetryError,
+    )):
+        return True
+
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        return exc.response.status_code in RETRYABLE_STATUS_CODES
+
+    return False
+
+
 def _request(method, url, **kwargs):
     session = _get_session()
-    resp = session.request(method, url, timeout=DEFAULT_TIMEOUT, **kwargs)
-    resp.raise_for_status()
+    try:
+        resp = session.request(method, url, timeout=DEFAULT_TIMEOUT, **kwargs)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        if _is_retryable_request_exception(exc):
+            raise UpstreamRequestError(
+                "上流シラバスサーバーへの接続に失敗しました。少し待ってから再試行してください。"
+            ) from exc
+        raise
     resp.encoding = "utf-8"
     return resp
 
 
 def _copy_course(course):
-    copied = dict(course)
-    evaluation = copied.get("evaluation")
-    if isinstance(evaluation, dict):
-        copied["evaluation"] = dict(evaluation)
-    return copied
+    return copy.deepcopy(course)
 
 
 def _copy_result(result):
@@ -132,6 +238,10 @@ def _copy_result(result):
         "courses": [_copy_course(course) for course in result["courses"]],
         "max_page": result["max_page"],
     }
+
+
+def _copy_bundle(bundle):
+    return copy.deepcopy(bundle)
 
 
 def _search_cache_key(page, kwargs):
@@ -232,6 +342,7 @@ def parse_results(html):
         schedule = _jp_text(tds[6])
         campus = _jp_text(tds[7])
         notes = _jp_text(tds[8])
+        curriculum = _extract_curriculum_labels(notes)
 
         courses.append({
             "code": code,
@@ -244,6 +355,8 @@ def parse_results(html):
             "schedule": schedule,
             "campus": campus,
             "notes": notes,
+            "curriculum": curriculum,
+            "curriculum_text": _dedupe_lines(notes),
         })
 
     max_page = 1
@@ -281,14 +394,223 @@ def search_courses(page=1, **kwargs):
     return _copy_result(result)
 
 
-def get_syllabus_detail(url=None, nendo=None, kodo_2=None):
-    if nendo and kodo_2:
-        url = f"{BASE_URL}/preview.php?nendo={nendo}&kodo_2={kodo_2}"
-    if not url:
-        return {}
-    resp = _request("GET", url)
-    soup = BeautifulSoup(resp.text, "html.parser")
+def _normalize_compact_text(text):
+    return re.sub(r"\s+", "", (text or "")).replace("　", "").lower()
 
+
+def _dedupe_lines(text):
+    seen = set()
+    deduped = []
+    for line in (text or "").splitlines():
+        cleaned = line.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return "\n".join(deduped)
+
+
+def _is_empty_value(value):
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (list, tuple, set)):
+        return len(value) == 0
+    if isinstance(value, dict) and value.get("type") == "table":
+        return not value.get("rows") and not value.get("note")
+    return False
+
+
+def _contains_text(text, keyword):
+    if not text or not keyword:
+        return False
+    lowered = text.lower()
+    normalized_keyword = keyword.lower()
+    compact_text = _normalize_compact_text(text)
+    compact_keyword = _normalize_compact_text(keyword)
+    return keyword in text or normalized_keyword in lowered or compact_keyword in compact_text
+
+
+def _contains_keyword(text, keywords):
+    return any(_contains_text(text, keyword) for keyword in keywords)
+
+
+def _strip_report_only_phrases(text):
+    cleaned = text or ""
+    for pattern in REPORT_ONLY_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def _contains_test_like_text(text):
+    return _contains_keyword(_strip_report_only_phrases(text), TEST_LIKE_KEYWORDS)
+
+
+def _contains_presentation_text(text):
+    return _contains_keyword(text, PRESENTATION_KEYWORDS)
+
+
+def _canonicalize_curriculum_label(label):
+    if not label:
+        return ""
+
+    cleaned = re.sub(r"\s+", "", label).replace("　", "")
+    cleaned = cleaned.strip("／/|・、,;；")
+    cleaned = cleaned.replace("全学共通カリキュラム", "")
+    cleaned = cleaned.replace("学びの精神科目", "学びの精神")
+
+    if cleaned.startswith("多彩な学び"):
+        return "多彩な学び"
+    if cleaned.startswith("学びの精神"):
+        return "学びの精神"
+    return cleaned
+
+
+def _normalize_detail_label(label):
+    parts = [part.strip() for part in str(label or "").split("/") if part.strip()]
+    if not parts:
+        return ""
+    return parts[0]
+
+
+def _slugify_ascii(text):
+    slug = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+    return slug
+
+
+def _canonical_detail_key(raw_label, index=0):
+    normalized_label = _normalize_detail_label(raw_label)
+    if normalized_label in DETAIL_FIELD_ALIASES:
+        return DETAIL_FIELD_ALIASES[normalized_label]
+    if raw_label in DETAIL_FIELD_ALIASES:
+        return DETAIL_FIELD_ALIASES[raw_label]
+
+    parts = [part.strip() for part in str(raw_label or "").split("/") if part.strip()]
+    for part in reversed(parts):
+        if re.search(r"[A-Za-z]", part):
+            slug = _slugify_ascii(part)
+            if slug:
+                return slug
+
+    fallback = _slugify_ascii(normalized_label)
+    if fallback:
+        return fallback
+    return f"field_{index + 1}"
+
+
+def _extract_curriculum_labels(*texts):
+    labels = []
+    seen = set()
+
+    for text in texts:
+        if not text:
+            continue
+
+        raw_lines = [str(text)]
+        raw_lines.extend(str(text).splitlines())
+        for raw_line in raw_lines:
+            if not raw_line:
+                continue
+
+            candidates = [raw_line]
+            if "：" in raw_line:
+                candidates.append(raw_line.split("：")[-1])
+            if ":" in raw_line:
+                candidates.append(raw_line.split(":")[-1])
+
+            for candidate in candidates:
+                for segment in re.split(r"[\n\r/／|]", candidate):
+                    chunk = segment.strip()
+                    if not chunk:
+                        continue
+                    for pattern in CURRICULUM_LABEL_PATTERNS:
+                        for match in re.finditer(pattern, chunk):
+                            label = _canonicalize_curriculum_label(match.group(0))
+                            if label and label not in seen:
+                                seen.add(label)
+                                labels.append(label)
+
+    return labels
+
+
+def _stringify_detail_value(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and value.get("type") == "table":
+        parts = []
+        note = value.get("note")
+        if note:
+            parts.append(note)
+        for row in value.get("rows", []):
+            row_text = " ".join(cell for cell in row if cell)
+            if row_text:
+                parts.append(row_text)
+        return "\n".join(parts)
+    return ""
+
+
+def _get_detail_text(detail, keyword):
+    parts = []
+    for key, value in detail.items():
+        if keyword in key:
+            text = _stringify_detail_value(value)
+            if text:
+                parts.append(text)
+    return _dedupe_lines("\n".join(parts))
+
+
+def _build_course_metadata(detail, evaluation=None):
+    notice = _get_detail_text(detail, "注意事項")
+    curriculum_labels = _extract_curriculum_labels(notice)
+
+    return {
+        "credits": _stringify_detail_value(detail.get("単位", "")),
+        "semester": _stringify_detail_value(detail.get("学期", "")),
+        "notice": notice,
+        "curriculum": curriculum_labels,
+        "curriculum_text": _dedupe_lines(notice),
+        "has_test": bool(evaluation and evaluation.get("has_test")),
+        "has_presentation": bool(evaluation and evaluation.get("has_presentation")),
+    }
+
+
+def _merge_course_metadata(base_metadata, search_notes=""):
+    metadata = copy.deepcopy(base_metadata or {})
+    combined_curriculum_text = _dedupe_lines(
+        "\n".join(filter(None, [metadata.get("curriculum_text", ""), search_notes]))
+    )
+    metadata["curriculum_text"] = combined_curriculum_text
+
+    labels = list(metadata.get("curriculum") or [])
+    for label in _extract_curriculum_labels(search_notes):
+        if label not in labels:
+            labels.append(label)
+    metadata["curriculum"] = labels
+    return metadata
+
+
+def _detail_bundle_cache_key(nendo, code):
+    return f"{nendo}:{code}"
+
+
+def _get_cached_detail_bundle(nendo, code):
+    cache_key = _detail_bundle_cache_key(nendo, code)
+    with _detail_bundle_cache_lock:
+        cached = _detail_bundle_cache.get(cache_key)
+    return _copy_bundle(cached) if isinstance(cached, dict) else None
+
+
+def _set_cached_detail_bundle(nendo, code, bundle):
+    if bundle is None:
+        return
+    cache_key = _detail_bundle_cache_key(nendo, code)
+    with _detail_bundle_cache_lock:
+        _detail_bundle_cache[cache_key] = _copy_bundle(bundle)
+
+
+def parse_syllabus_detail_html(html):
+    soup = BeautifulSoup(html, "html.parser")
     detail = {}
 
     attr_table = soup.find("table", class_="attribute")
@@ -358,6 +680,143 @@ def get_syllabus_detail(url=None, nendo=None, kodo_2=None):
     return detail
 
 
+def _build_detail_bundle_from_html(html):
+    detail = parse_syllabus_detail_html(html)
+    evaluation = _parse_evaluation_info(html)
+    metadata = _build_course_metadata(detail, evaluation=evaluation)
+    return {
+        "detail": detail,
+        "evaluation": evaluation,
+        "metadata": metadata,
+    }
+
+
+def _merge_structured_field_value(existing, incoming):
+    if _is_empty_value(existing):
+        return copy.deepcopy(incoming)
+    if _is_empty_value(incoming):
+        return copy.deepcopy(existing)
+    if existing == incoming:
+        return copy.deepcopy(existing)
+    if isinstance(existing, str) and isinstance(incoming, str):
+        return _dedupe_lines("\n".join([existing, incoming]))
+    return copy.deepcopy(existing)
+
+
+def _build_structured_detail_fields(detail, metadata=None):
+    detail_fields = {}
+    detail_field_labels = {}
+
+    for index, (raw_key, value) in enumerate((detail or {}).items()):
+        canonical_key = _canonical_detail_key(raw_key, index=index)
+        detail_fields[canonical_key] = _merge_structured_field_value(
+            detail_fields.get(canonical_key),
+            value,
+        )
+        detail_field_labels.setdefault(canonical_key, _normalize_detail_label(raw_key) or raw_key)
+
+    metadata = metadata or {}
+    curriculum = list(metadata.get("curriculum") or [])
+    if curriculum:
+        detail_fields["curriculum"] = curriculum
+        detail_field_labels.setdefault("curriculum", "カリキュラム区分")
+
+    curriculum_text = metadata.get("curriculum_text", "")
+    if curriculum_text:
+        detail_fields["curriculum_text"] = curriculum_text
+        detail_field_labels.setdefault("curriculum_text", "カリキュラム区分メモ")
+
+    return detail_fields, detail_field_labels
+
+
+def _build_structured_syllabus_detail(bundle, nendo=None, kodo_2=None):
+    bundle = bundle or {}
+    raw_detail = copy.deepcopy(bundle.get("detail") or {})
+    evaluation = copy.deepcopy(bundle.get("evaluation") or {})
+    metadata = copy.deepcopy(bundle.get("metadata") or {})
+    detail_fields, detail_field_labels = _build_structured_detail_fields(raw_detail, metadata=metadata)
+
+    def field_text(key, default=""):
+        return _stringify_detail_value(detail_fields.get(key, default))
+
+    curriculum = list(detail_fields.get("curriculum") or metadata.get("curriculum") or [])
+    curriculum_text = field_text("curriculum_text") or metadata.get("curriculum_text", "")
+    notice = field_text("notice") or metadata.get("notice", "")
+
+    structured = {
+        "nendo": nendo,
+        "code": field_text("code") or (kodo_2 or ""),
+        "numbering": field_text("numbering"),
+        "name": field_text("name"),
+        "teacher": field_text("teacher"),
+        "semester": field_text("semester") or metadata.get("semester", ""),
+        "schedule": field_text("schedule"),
+        "campus": field_text("campus"),
+        "credits": field_text("credits") or metadata.get("credits", ""),
+        "reg_method": field_text("reg_method"),
+        "withdrawal_available": field_text("withdrawal_available"),
+        "format": field_text("format"),
+        "curriculum": curriculum,
+        "curriculum_text": curriculum_text,
+        "notice": notice,
+        "evaluation": evaluation,
+        "detail_fields": detail_fields,
+        "detail_field_labels": detail_field_labels,
+        "raw_detail": raw_detail,
+    }
+
+    if evaluation and "evaluation_method" not in structured["detail_fields"]:
+        structured["detail_fields"]["evaluation_method"] = {
+            "type": "table",
+            "headers": ["指標", "値"],
+            "rows": [
+                ["試験", str(evaluation.get("exam_pct", 0))],
+                ["筆記試験", str(evaluation.get("written_pct", 0))],
+                ["レポート", str(evaluation.get("report_pct", 0))],
+                ["平常点", str(evaluation.get("in_class_pct", 0))],
+            ],
+            "note": evaluation.get("notes", ""),
+        }
+        structured["detail_field_labels"].setdefault("evaluation_method", "成績評価方法・基準")
+
+    return structured
+
+
+def _fetch_detail_bundle(nendo, code):
+    cached = _get_cached_detail_bundle(nendo, code)
+    if cached is not None:
+        return cached
+
+    url = f"{BASE_URL}/preview.php?nendo={nendo}&kodo_2={code}"
+    resp = _request("GET", url)
+    bundle = _build_detail_bundle_from_html(resp.text)
+    _set_cached_detail_bundle(nendo, code, bundle)
+    if isinstance(bundle.get("evaluation"), dict):
+        _set_cached_evaluation(nendo, code, bundle["evaluation"])
+    return _copy_bundle(bundle)
+
+
+def get_syllabus_detail(url=None, nendo=None, kodo_2=None):
+    if nendo and kodo_2:
+        bundle = _fetch_detail_bundle(nendo, kodo_2)
+        return copy.deepcopy(bundle.get("detail") or {})
+    if not url:
+        return {}
+    resp = _request("GET", url)
+    return parse_syllabus_detail_html(resp.text)
+
+
+def get_structured_syllabus_detail(url=None, nendo=None, kodo_2=None):
+    if nendo and kodo_2:
+        bundle = _fetch_detail_bundle(nendo, kodo_2)
+        return _build_structured_syllabus_detail(bundle, nendo=nendo, kodo_2=kodo_2)
+    if not url:
+        return {}
+    resp = _request("GET", url)
+    bundle = _build_detail_bundle_from_html(resp.text)
+    return _build_structured_syllabus_detail(bundle, nendo=nendo, kodo_2=kodo_2)
+
+
 def _find_evaluation_table(content_div):
     found_heading = False
     for el in content_div.find_all(["h3", "table"]):
@@ -370,11 +829,6 @@ def _find_evaluation_table(content_div):
         elif found_heading and el.name == "table":
             return el
     return None
-
-
-def _contains_keyword(text, keywords):
-    lowered = text.lower()
-    return any(keyword in text or keyword in lowered for keyword in keywords)
 
 
 def _is_exam_component(kind):
@@ -409,42 +863,63 @@ def _parse_evaluation_info(html):
     in_class_pct = 0
     other_pct = 0
     details_parts = []
+    notes_parts = []
+    combined_text_parts = []
+    components = []
 
     for row in target_table.find_all("tr"):
         cells = row.find_all("td")
-        if len(cells) < 2:
+        if len(cells) >= 2:
+            kind = _jp_text(cells[0])
+            pct_text = _jp_text(cells[1])
+            pct_match = re.search(r"(\d+)", pct_text)
+            pct = int(pct_match.group(1)) if pct_match else 0
+            criteria = _jp_text(cells[2]) if len(cells) > 2 else ""
+
+            is_exam = _is_exam_component(kind)
+            is_report = _is_report_component(kind)
+            is_written_exam = _is_written_exam_component(kind)
+            is_in_class = _is_in_class_component(kind)
+
+            if is_exam:
+                exam_pct += pct
+            if is_written_exam:
+                written_exam_pct += pct
+            if is_report:
+                report_pct += pct
+            if is_in_class:
+                in_class_pct += pct
+            if not is_exam and not is_in_class:
+                other_pct += pct
+
+            detail_line = " ".join(part for part in [kind, pct_text] if part)
+            if criteria:
+                detail_line = f"{detail_line} ({criteria})" if detail_line else criteria
+            if detail_line:
+                details_parts.append(detail_line)
+                combined_text_parts.append(detail_line)
+
+            components.append({
+                "kind": kind,
+                "percentage": pct,
+                "percentage_text": pct_text,
+                "criteria": criteria,
+                "has_test": _contains_test_like_text(" ".join(filter(None, [kind, criteria]))),
+                "has_presentation": _contains_presentation_text(" ".join(filter(None, [kind, criteria]))),
+            })
             continue
 
-        kind = _jp_text(cells[0])
-        pct_text = _jp_text(cells[1])
-        pct_match = re.search(r"(\d+)", pct_text)
-        pct = int(pct_match.group(1)) if pct_match else 0
-        criteria = _jp_text(cells[2]) if len(cells) > 2 else ""
+        note_text = _jp_text(row)
+        if note_text and "備考" not in note_text:
+            notes_parts.append(note_text)
+            combined_text_parts.append(note_text)
 
-        is_exam = _is_exam_component(kind)
-        is_report = _is_report_component(kind)
-        is_written_exam = _is_written_exam_component(kind)
-        is_in_class = _is_in_class_component(kind)
-
-        if is_exam:
-            exam_pct += pct
-        if is_written_exam:
-            written_exam_pct += pct
-        if is_report:
-            report_pct += pct
-        if is_in_class:
-            in_class_pct += pct
-        if not is_exam and not is_in_class:
-            other_pct += pct
-
-        if kind and pct_text:
-            detail_line = f"{kind} {pct_text}"
-            if criteria:
-                detail_line += f" ({criteria})"
-            details_parts.append(detail_line)
+    combined_text = "\n".join(filter(None, combined_text_parts))
+    notes_text = _dedupe_lines("\n".join(notes_parts))
 
     return {
         "exam_pct": exam_pct,
+        "written_pct": written_exam_pct,
         "written_exam_pct": written_exam_pct,
         "report_pct": report_pct,
         "in_class_pct": in_class_pct,
@@ -453,7 +928,12 @@ def _parse_evaluation_info(html):
         "has_written_exam": written_exam_pct > 0,
         "has_report": report_pct > 0,
         "is_report_100": report_pct == 100,
+        "has_test": _contains_test_like_text(combined_text),
+        "has_presentation": _contains_presentation_text(combined_text),
+        "notes": notes_text,
+        "components": components,
         "details": "; ".join(details_parts),
+        "combined_text": combined_text,
     }
 
 
@@ -481,14 +961,41 @@ def _fetch_evaluation(nendo, code):
     if cached is not None:
         return cached
 
-    url = f"{BASE_URL}/preview.php?nendo={nendo}&kodo_2={code}"
     try:
-        resp = _request("GET", url)
-        evaluation = _parse_evaluation_info(resp.text)
-        _set_cached_evaluation(nendo, code, evaluation)
+        bundle = _fetch_detail_bundle(nendo, code)
+        evaluation = bundle.get("evaluation")
         return dict(evaluation) if isinstance(evaluation, dict) else None
     except Exception:
         return None
+
+
+def get_course_bundle_batch(nendo, codes):
+    results = {}
+    missing_codes = []
+
+    for code in codes:
+        cached = _get_cached_detail_bundle(nendo, code)
+        if cached is not None:
+            results[code] = cached
+        else:
+            missing_codes.append(code)
+
+    if not missing_codes:
+        return results
+
+    worker_count = min(12, len(missing_codes))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {executor.submit(_fetch_detail_bundle, nendo, code): code for code in missing_codes}
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                bundle = future.result()
+                if isinstance(bundle, dict):
+                    results[code] = bundle
+            except Exception:
+                pass
+
+    return results
 
 
 def get_evaluation_batch(nendo, codes):
@@ -545,14 +1052,36 @@ def _matches_evaluation_filter(evaluation, exam_filter, exam_max, report_min=0):
 
 def attach_evaluations_to_courses(courses, nendo):
     codes = [course["code"] for course in courses if course.get("code")]
-    evaluations = get_evaluation_batch(nendo, codes)
+    bundles = get_course_bundle_batch(nendo, codes)
 
     enriched_courses = []
     for index, course in enumerate(courses):
         enriched_course = _copy_course(course)
-        evaluation = evaluations.get(course.get("code"))
+        bundle = bundles.get(course.get("code")) or {}
+        evaluation = bundle.get("evaluation")
         if evaluation is not None:
             enriched_course["evaluation"] = dict(evaluation)
+            enriched_course["has_test"] = bool(evaluation.get("has_test"))
+            enriched_course["has_presentation"] = bool(evaluation.get("has_presentation"))
+
+        metadata = _merge_course_metadata(bundle.get("metadata"), enriched_course.get("notes", ""))
+        if metadata:
+            enriched_course["metadata"] = metadata
+            if metadata.get("credits"):
+                enriched_course["credits"] = metadata["credits"]
+            if metadata.get("curriculum"):
+                enriched_course["curriculum"] = list(metadata["curriculum"])
+            if metadata.get("curriculum_text"):
+                enriched_course["curriculum_text"] = metadata["curriculum_text"]
+            if metadata.get("notice"):
+                enriched_course["notice"] = metadata["notice"]
+            if not enriched_course.get("semester") and metadata.get("semester"):
+                enriched_course["semester"] = metadata["semester"]
+            if "has_test" not in enriched_course:
+                enriched_course["has_test"] = bool(metadata.get("has_test"))
+            if "has_presentation" not in enriched_course:
+                enriched_course["has_presentation"] = bool(metadata.get("has_presentation"))
+
         enriched_course["source_order"] = index
         enriched_courses.append(enriched_course)
     return enriched_courses
@@ -565,6 +1094,86 @@ def filter_courses_by_evaluation(courses, exam_filter="all", exam_max=100, repor
         if _matches_evaluation_filter(evaluation, exam_filter, exam_max, report_min=report_min):
             filtered_courses.append(course)
     return filtered_courses
+
+
+def _matches_semester_filter(course, semester_filters=None):
+    if not semester_filters:
+        return True
+
+    semester_text = course.get("semester") or (course.get("metadata") or {}).get("semester", "")
+    normalized_semester = _normalize_compact_text(semester_text)
+    return any(_normalize_compact_text(semester) in normalized_semester for semester in semester_filters)
+
+
+def _matches_curriculum_filter(course, curriculum_filters=None):
+    if not curriculum_filters:
+        return True
+
+    metadata = course.get("metadata") or {}
+    labels = metadata.get("curriculum") or course.get("curriculum") or []
+    search_space = "\n".join(filter(None, [metadata.get("curriculum_text", ""), course.get("notes", "")]))
+    normalized_search_space = _normalize_compact_text(search_space)
+
+    for curriculum in curriculum_filters:
+        normalized_curriculum = _normalize_compact_text(curriculum)
+        if any(normalized_curriculum in _normalize_compact_text(label) for label in labels):
+            return True
+        if normalized_curriculum in normalized_search_space:
+            return True
+
+    return False
+
+
+def _matches_course_filters(
+    course,
+    semester_filters=None,
+    curriculum_filters=None,
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    no_test=False,
+    no_presentation=False,
+):
+    if not _matches_semester_filter(course, semester_filters=semester_filters):
+        return False
+    if not _matches_curriculum_filter(course, curriculum_filters=curriculum_filters):
+        return False
+
+    if exam_filter != "all" or exam_max < 100 or report_min > 0:
+        if not _matches_evaluation_filter(course.get("evaluation"), exam_filter, exam_max, report_min=report_min):
+            return False
+
+    if no_test and course.get("has_test"):
+        return False
+    if no_presentation and course.get("has_presentation"):
+        return False
+    return True
+
+
+def filter_courses_advanced(
+    courses,
+    semester_filters=None,
+    curriculum_filters=None,
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    no_test=False,
+    no_presentation=False,
+):
+    return [
+        course
+        for course in courses
+        if _matches_course_filters(
+            course,
+            semester_filters=semester_filters,
+            curriculum_filters=curriculum_filters,
+            exam_filter=exam_filter,
+            exam_max=exam_max,
+            report_min=report_min,
+            no_test=no_test,
+            no_presentation=no_presentation,
+        )
+    ]
 
 
 def search_courses_page_with_evaluations(page=1, exam_filter="all", exam_max=100, report_min=0, **kwargs):
@@ -584,6 +1193,156 @@ def search_courses_page_with_evaluations(page=1, exam_filter="all", exam_max=100
         "max_page": page_result["max_page"],
         "courses": filtered_courses,
     }
+
+
+def search_courses_advanced(
+    page=1,
+    all_pages=False,
+    max_results=None,
+    semester_filters=None,
+    curriculum_filters=None,
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    no_test=False,
+    no_presentation=False,
+    timeout_seconds=None,
+    progress_callback=None,
+    **kwargs,
+):
+    nendo = kwargs.get("nendo", "2025")
+    semester_filters = semester_filters or []
+    curriculum_filters = curriculum_filters or []
+
+    if max_results is not None and max_results < 1:
+        raise ValueError("max_results must be at least 1")
+    if timeout_seconds is not None and timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than 0")
+
+    def emit_progress(event, **extra):
+        if progress_callback is None:
+            return
+        payload = {
+            "event": event,
+            "elapsed_seconds": time.monotonic() - start_time,
+            **extra,
+        }
+        try:
+            progress_callback(payload)
+        except Exception:
+            pass
+
+    start_time = time.monotonic()
+    deadline = start_time + timeout_seconds if timeout_seconds is not None else None
+    first_page_result = search_courses(page=page, **kwargs)
+    max_page = first_page_result["max_page"]
+    pages_to_scan = [page]
+    if all_pages or max_results is not None:
+        pages_to_scan = list(range(page, max_page + 1))
+
+    collected_courses = []
+    complete_results = True
+    scanned_pages = 0
+    stopped_reason = None
+
+    emit_progress(
+        "start",
+        start_page=page,
+        total=first_page_result["total"],
+        max_page=max_page,
+        pages_planned=len(pages_to_scan),
+        all_pages=all_pages,
+        max_results=max_results,
+        timeout_seconds=timeout_seconds,
+    )
+
+    for page_index, current_page in enumerate(pages_to_scan):
+        if page_index > 0 and deadline is not None and time.monotonic() >= deadline:
+            complete_results = False
+            stopped_reason = "timeout"
+            emit_progress(
+                "timeout",
+                page=current_page,
+                pages_fetched=scanned_pages,
+                pages_planned=len(pages_to_scan),
+                matched_total=len(collected_courses),
+                timeout_seconds=timeout_seconds,
+            )
+            break
+
+        scanned_pages += 1
+        page_result = first_page_result if page_index == 0 else search_courses(page=current_page, **kwargs)
+        enriched_courses = attach_evaluations_to_courses(page_result["courses"], nendo)
+        for course in enriched_courses:
+            course["source_page"] = current_page
+
+        filtered_courses = filter_courses_advanced(
+            enriched_courses,
+            semester_filters=semester_filters,
+            curriculum_filters=curriculum_filters,
+            exam_filter=exam_filter,
+            exam_max=exam_max,
+            report_min=report_min,
+            no_test=no_test,
+            no_presentation=no_presentation,
+        )
+
+        collected_courses.extend(filtered_courses)
+        emit_progress(
+            "page",
+            page=current_page,
+            page_index=scanned_pages,
+            pages_planned=len(pages_to_scan),
+            matched_on_page=len(filtered_courses),
+            matched_total=len(collected_courses),
+        )
+        if max_results is not None and len(collected_courses) >= max_results:
+            collected_courses = collected_courses[:max_results]
+            if current_page < max_page:
+                complete_results = False
+                stopped_reason = "max_results"
+                emit_progress(
+                    "limit_reached",
+                    page=current_page,
+                    pages_fetched=scanned_pages,
+                    pages_planned=len(pages_to_scan),
+                    matched_total=len(collected_courses),
+                    max_results=max_results,
+                )
+            break
+
+    result = {
+        "page": page,
+        "total": first_page_result["total"],
+        "max_page": max_page,
+        "pages_fetched": scanned_pages,
+        "all_pages": all_pages,
+        "complete_results": complete_results,
+        "timed_out": stopped_reason == "timeout",
+        "timeout_seconds": timeout_seconds,
+        "stopped_reason": stopped_reason,
+        "returned_count": len(collected_courses),
+        "courses": collected_courses,
+        "filters": {
+            "semester": semester_filters,
+            "curriculum": curriculum_filters,
+            "exam_filter": exam_filter,
+            "exam_max": exam_max,
+            "report_min": report_min,
+            "no_test": no_test,
+            "no_presentation": no_presentation,
+            "max_results": max_results,
+        },
+    }
+    emit_progress(
+        "complete",
+        pages_fetched=scanned_pages,
+        pages_planned=len(pages_to_scan),
+        matched_total=len(collected_courses),
+        complete_results=complete_results,
+        stopped_reason=stopped_reason,
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +1406,39 @@ def easy_search_with_evaluations(page=1, exam_filter="all", exam_max=100, report
     )
 
 
+def easy_search_advanced(
+    page=1,
+    all_pages=False,
+    max_results=None,
+    semester_filters=None,
+    curriculum_filters=None,
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    no_test=False,
+    no_presentation=False,
+    timeout_seconds=None,
+    progress_callback=None,
+    **kwargs,
+):
+    params = resolve_params(**kwargs)
+    return search_courses_advanced(
+        page=page,
+        all_pages=all_pages,
+        max_results=max_results,
+        semester_filters=semester_filters,
+        curriculum_filters=curriculum_filters,
+        exam_filter=exam_filter,
+        exam_max=exam_max,
+        report_min=report_min,
+        no_test=no_test,
+        no_presentation=no_presentation,
+        timeout_seconds=timeout_seconds,
+        progress_callback=progress_callback,
+        **params,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Safe wrappers — structured responses for AI / programmatic callers
 # ---------------------------------------------------------------------------
@@ -667,7 +1459,7 @@ def safe_search(page=1, **kwargs):
 def safe_detail(url=None, nendo=None, kodo_2=None):
     """Get syllabus detail with structured response wrapper."""
     try:
-        detail = get_syllabus_detail(url=url, nendo=nendo, kodo_2=kodo_2)
+        detail = get_structured_syllabus_detail(url=url, nendo=nendo, kodo_2=kodo_2)
         if not detail:
             return _err("not_found", "Syllabus detail page returned no data")
         return _ok(detail)
@@ -688,6 +1480,48 @@ def safe_search_with_evaluations(page=1, exam_filter="all", exam_max=100, report
         return _ok(result)
     except requests.exceptions.RequestException as e:
         return _err("network_error", str(e))
+    except Exception as e:
+        return _err("parse_error", str(e))
+
+
+def safe_search_advanced(
+    page=1,
+    all_pages=False,
+    max_results=None,
+    semester_filters=None,
+    curriculum_filters=None,
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    no_test=False,
+    no_presentation=False,
+    timeout_seconds=None,
+    progress_callback=None,
+    **kwargs,
+):
+    try:
+        result = search_courses_advanced(
+            page=page,
+            all_pages=all_pages,
+            max_results=max_results,
+            semester_filters=semester_filters,
+            curriculum_filters=curriculum_filters,
+            exam_filter=exam_filter,
+            exam_max=exam_max,
+            report_min=report_min,
+            no_test=no_test,
+            no_presentation=no_presentation,
+            timeout_seconds=timeout_seconds,
+            progress_callback=progress_callback,
+            **kwargs,
+        )
+        if result["total"] == 0:
+            return _ok({"total": 0, "courses": [], "max_page": 1, "page": page, "note": "no_results"})
+        return _ok(result)
+    except requests.exceptions.RequestException as e:
+        return _err("network_error", str(e))
+    except ValueError as e:
+        return _err("invalid_params", str(e))
     except Exception as e:
         return _err("parse_error", str(e))
 
@@ -730,46 +1564,142 @@ def search_and_detail(top_n=5, include_detail=True, **kwargs):
         return _err("parse_error", str(e))
 
 
-def search_and_detail_parallel(top_n=5, **kwargs):
-    """Like search_and_detail but fetches details in parallel for speed."""
+def _merge_course_with_structured_detail(course, structured_detail):
+    merged = _copy_course(course)
+    structured_detail = structured_detail or {}
+
+    for key in STRUCTURED_DETAIL_SUMMARY_KEYS:
+        incoming = structured_detail.get(key)
+        if _is_empty_value(incoming):
+            continue
+        if key == "curriculum":
+            labels = list(merged.get("curriculum") or [])
+            for label in incoming:
+                if label not in labels:
+                    labels.append(label)
+            merged["curriculum"] = labels
+            continue
+        if key == "curriculum_text":
+            merged[key] = _dedupe_lines("\n".join(filter(None, [merged.get(key, ""), incoming])))
+            continue
+        if key == "notice":
+            merged[key] = _dedupe_lines("\n".join(filter(None, [merged.get(key, ""), incoming])))
+            continue
+        if not merged.get(key):
+            merged[key] = copy.deepcopy(incoming)
+        elif key in {"credits", "reg_method", "withdrawal_available", "format"}:
+            merged[key] = copy.deepcopy(incoming)
+
+    if structured_detail.get("evaluation"):
+        merged["evaluation"] = copy.deepcopy(structured_detail["evaluation"])
+    if structured_detail.get("detail_fields"):
+        merged["detail_fields"] = copy.deepcopy(structured_detail["detail_fields"])
+    if structured_detail.get("detail_field_labels"):
+        merged["detail_field_labels"] = dict(structured_detail["detail_field_labels"])
+    if structured_detail.get("raw_detail"):
+        merged["raw_detail"] = copy.deepcopy(structured_detail["raw_detail"])
+    if structured_detail.get("nendo"):
+        merged["nendo"] = structured_detail["nendo"]
+    return merged
+
+
+def _search_courses_with_details(
+    page=1,
+    top_n=5,
+    all_results=False,
+    all_pages=False,
+    max_results=None,
+    semester_filters=None,
+    curriculum_filters=None,
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    no_test=False,
+    no_presentation=False,
+    timeout_seconds=None,
+    progress_callback=None,
+    **kwargs,
+):
+    params = resolve_params(**kwargs)
+    nendo = params.get("nendo", "2025")
+    search_result = search_courses_advanced(
+        page=page,
+        all_pages=all_pages,
+        max_results=max_results,
+        semester_filters=semester_filters,
+        curriculum_filters=curriculum_filters,
+        exam_filter=exam_filter,
+        exam_max=exam_max,
+        report_min=report_min,
+        no_test=no_test,
+        no_presentation=no_presentation,
+        timeout_seconds=timeout_seconds,
+        progress_callback=progress_callback,
+        **params,
+    )
+
+    courses = search_result["courses"]
+    if not all_results:
+        courses = courses[:top_n]
+
+    bundles = get_course_bundle_batch(nendo, [course["code"] for course in courses if course.get("code")])
+    enriched_courses = []
+    for course in courses:
+        bundle = bundles.get(course.get("code")) or {}
+        structured_detail = _build_structured_syllabus_detail(bundle, nendo=nendo, kodo_2=course.get("code"))
+        enriched_courses.append(_merge_course_with_structured_detail(course, structured_detail))
+
+    result = dict(search_result)
+    result["courses"] = enriched_courses
+    result["showing"] = len(enriched_courses)
+    result["detail_scope"] = "all_results" if all_results else f"top_{len(enriched_courses)}"
+    return result
+
+
+def search_and_detail_parallel(
+    top_n=5,
+    all_results=False,
+    page=1,
+    all_pages=False,
+    max_results=None,
+    semester_filters=None,
+    curriculum_filters=None,
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    no_test=False,
+    no_presentation=False,
+    timeout_seconds=None,
+    progress_callback=None,
+    **kwargs,
+):
+    """Search courses and attach structured syllabus details."""
     try:
-        params = resolve_params(**kwargs)
-        nendo = params.get("nendo", "2025")
-        result = search_courses(page=1, **params)
+        result = _search_courses_with_details(
+            page=page,
+            top_n=top_n,
+            all_results=all_results,
+            all_pages=all_pages,
+            max_results=max_results,
+            semester_filters=semester_filters,
+            curriculum_filters=curriculum_filters,
+            exam_filter=exam_filter,
+            exam_max=exam_max,
+            report_min=report_min,
+            no_test=no_test,
+            no_presentation=no_presentation,
+            timeout_seconds=timeout_seconds,
+            progress_callback=progress_callback,
+            **kwargs,
+        )
 
         if result["total"] == 0:
             return _ok({"total": 0, "courses": [], "note": "no_results"})
-
-        courses = result["courses"][:top_n]
-        codes = [c["code"] for c in courses if c.get("code")]
-
-        details = {}
-        worker_count = min(6, len(codes))
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {}
-            for code in codes:
-                future = executor.submit(get_syllabus_detail, nendo=nendo, kodo_2=code)
-                futures[future] = code
-            for future in as_completed(futures):
-                code = futures[future]
-                try:
-                    details[code] = future.result()
-                except Exception:
-                    details[code] = None
-
-        for course in courses:
-            code = course.get("code")
-            if code and code in details:
-                course["syllabus"] = details[code]
-
-        return _ok({
-            "total": result["total"],
-            "max_page": result["max_page"],
-            "showing": len(courses),
-            "courses": courses,
-        })
+        return _ok(result)
     except requests.exceptions.RequestException as e:
         return _err("network_error", str(e))
+    except ValueError as e:
+        return _err("invalid_params", str(e))
     except Exception as e:
         return _err("parse_error", str(e))
 

@@ -227,6 +227,10 @@
     border-collapse: collapse;
     font-size: 13px;
   }
+  .results-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   .results-table th {
     background: var(--purple);
     color: var(--white);
@@ -240,6 +244,7 @@
   .results-table td {
     padding: 10px 12px;
     border-bottom: 1px solid #f0f0f0;
+    vertical-align: top;
   }
   .results-table tr:hover td {
     background: var(--purple-bg);
@@ -284,6 +289,7 @@
     cursor: pointer;
     font-size: 13px;
     transition: all 0.2s;
+    white-space: nowrap;
   }
   .pagination button:hover { border-color: var(--purple); color: var(--purple); }
   .pagination button.active {
@@ -294,6 +300,61 @@
   .pagination button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  @media (max-width: 768px) {
+    .results-table {
+      min-width: 760px;
+      font-size: 12px;
+      table-layout: fixed;
+    }
+    .results-table th,
+    .results-table td {
+      padding: 10px 6px;
+      line-height: 1.55;
+    }
+    .results-table th:nth-child(1),
+    .results-table td:nth-child(1) { width: 72px; }
+    .results-table th:nth-child(2),
+    .results-table td:nth-child(2) { width: 90px; }
+    .results-table th:nth-child(3),
+    .results-table td:nth-child(3) { width: 150px; }
+    .results-table th:nth-child(4),
+    .results-table td:nth-child(4) { width: 82px; }
+    .results-table th:nth-child(5),
+    .results-table td:nth-child(5) { width: 98px; }
+    .results-table th:nth-child(6),
+    .results-table td:nth-child(6) { width: 56px; }
+    .results-table th:nth-child(7),
+    .results-table td:nth-child(7) { width: 60px; }
+    .results-table th:nth-child(8),
+    .results-table td:nth-child(8) { width: 54px; }
+    .results-table th:nth-child(9),
+    .results-table td:nth-child(9) { width: 98px; }
+    .results-table td:nth-child(3),
+    .results-table td:nth-child(5),
+    .results-table td:nth-child(9) {
+      word-break: normal;
+      overflow-wrap: anywhere;
+    }
+    .results-table .course-name {
+      display: inline-block;
+      line-height: 1.6;
+    }
+    .pagination {
+      justify-content: flex-start;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      padding: 12px;
+      gap: 6px;
+      scrollbar-width: none;
+    }
+    .pagination::-webkit-scrollbar { display: none; }
+    .pagination button {
+      flex: 0 0 auto;
+      min-width: 46px;
+      padding: 7px 12px;
+    }
   }
 
   .loading {
@@ -823,7 +884,7 @@
       <h2>検索結果</h2>
       <span class="results-count" id="resultsCount"></span>
     </div>
-    <div style="overflow-x:auto;">
+    <div class="results-table-wrap">
       <table class="results-table">
         <thead>
           <tr>
@@ -1369,8 +1430,9 @@ function renderPagination(data, filteredCount) {
   let html = "";
   html += `<button ${currentPage <= 1 ? "disabled" : ""} onclick="doSearch(${currentPage - 1})">前へ</button>`;
 
-  const start = Math.max(1, currentPage - 4);
-  const end = Math.min(maxPage, currentPage + 5);
+  const pageWindow = window.matchMedia("(max-width: 768px)").matches ? 1 : 4;
+  const start = Math.max(1, currentPage - pageWindow);
+  const end = Math.min(maxPage, currentPage + pageWindow);
 
   if (start > 1) html += `<button onclick="doSearch(1)">1</button>`;
   if (start > 2) html += `<button disabled>...</button>`;
@@ -1412,29 +1474,33 @@ async function showDetail(code, name) {
     }
 
     const tier1Keys = [
-      "成績評価方法・基準",
-      "学期",
-      "曜日時限・教室",
-      "校地",
-      "単位",
-      "履修登録方法",
-      "履修中止可否",
-      "授業形態"
+      "evaluation_method",
+      "teacher",
+      "semester",
+      "schedule",
+      "campus",
+      "credits",
+      "reg_method",
+      "withdrawal_available",
+      "format",
+      "curriculum",
+      "notice"
     ];
     const tier2Keys = [
-      "授業の内容",
-      "授業の目標",
-      "Course Contents",
-      "Course Objectives",
-      "授業計画",
-      "授業時間外（予習・復習等）の学修",
-      "テキスト",
-      "参考文献"
+      "course_contents",
+      "course_objectives",
+      "course_plan",
+      "out_of_class_study",
+      "textbook",
+      "references"
     ];
+    const labels = data.detail_field_labels || {};
+    const detailFields = data.detail_fields || {};
 
     function isFieldEmpty(value) {
       if (value === null || value === undefined) return true;
       if (typeof value === "string") return value.trim() === "";
+      if (Array.isArray(value)) return value.length === 0;
       if (typeof value === "object" && value.type === "table") {
         return !value.rows || value.rows.length === 0;
       }
@@ -1443,6 +1509,9 @@ async function showDetail(code, name) {
 
     function renderDetailValue(value) {
       let valueHtml;
+      if (Array.isArray(value)) {
+        return value.join(" / ");
+      }
       if (typeof value === "object" && value !== null && value.type === "table") {
         const headers = value.headers || [];
         let table = '<div class="detail-table-wrap"><table class="detail-table">';
@@ -1470,25 +1539,25 @@ async function showDetail(code, name) {
 
     function renderDetailField(key, value) {
       const valueHtml = renderDetailValue(value);
-      return `<div class="detail-row"><div class="detail-label">${key}</div><div class="detail-value">${valueHtml}</div></div>`;
+      return `<div class="detail-row"><div class="detail-label">${labels[key] || key}</div><div class="detail-value">${valueHtml}</div></div>`;
     }
 
     function renderFeaturedField(key, value) {
-      return `<section class="detail-featured"><div class="detail-featured-kicker">履修判断でまず見る情報</div><div class="detail-featured-title">${key}</div><div class="detail-featured-body">${renderDetailValue(value)}</div></section>`;
+      return `<section class="detail-featured"><div class="detail-featured-kicker">履修判断でまず見る情報</div><div class="detail-featured-title">${labels[key] || key}</div><div class="detail-featured-body">${renderDetailValue(value)}</div></section>`;
     }
 
     function renderKeySummary(entries) {
       if (!entries.length) return "";
       return `<div class="detail-key-grid">${entries.map(([key, value]) => {
-        return `<div class="detail-key-item"><div class="detail-key-label">${key}</div><div class="detail-key-value">${renderDetailValue(value)}</div></div>`;
+        return `<div class="detail-key-item"><div class="detail-key-label">${labels[key] || key}</div><div class="detail-key-value">${renderDetailValue(value)}</div></div>`;
       }).join("")}</div>`;
     }
 
     function matchesTier(key, tierKeys) {
-      return tierKeys.some(tk => key.startsWith(tk));
+      return tierKeys.includes(key);
     }
 
-    const entries = Object.entries(data);
+    const entries = Object.entries(detailFields);
     const tier1Entries = [];
     const tier2Entries = [];
     const tier3Entries = [];
@@ -1507,22 +1576,22 @@ async function showDetail(code, name) {
 
     // Re-sort tier1 entries to match the defined order
     tier1Entries.sort((a, b) => {
-      const idxA = tier1Keys.findIndex(tk => a[0].startsWith(tk));
-      const idxB = tier1Keys.findIndex(tk => b[0].startsWith(tk));
+      const idxA = tier1Keys.indexOf(a[0]);
+      const idxB = tier1Keys.indexOf(b[0]);
       return idxA - idxB;
     });
 
     // Re-sort tier2 entries to match the defined order
     tier2Entries.sort((a, b) => {
-      const idxA = tier2Keys.findIndex(tk => a[0].startsWith(tk));
-      const idxB = tier2Keys.findIndex(tk => b[0].startsWith(tk));
+      const idxA = tier2Keys.indexOf(a[0]);
+      const idxB = tier2Keys.indexOf(b[0]);
       return idxA - idxB;
     });
 
     let html = "";
 
-    const featuredEntry = tier1Entries.find(([key]) => key.startsWith("成績評価方法・基準"));
-    const summaryEntries = tier1Entries.filter(([key]) => !key.startsWith("成績評価方法・基準"));
+    const featuredEntry = tier1Entries.find(([key]) => key === "evaluation_method");
+    const summaryEntries = tier1Entries.filter(([key]) => key !== "evaluation_method");
 
     if (featuredEntry || summaryEntries.length > 0) {
       html += '<div class="detail-summary">';
@@ -1601,5 +1670,8 @@ document.addEventListener("keydown", event => {
 
 initTimeGrid();
 </script>
+{% if cloudflare_web_analytics_token %}
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ cloudflare_web_analytics_token }}"}'></script>
+{% endif %}
 </body>
 </html>

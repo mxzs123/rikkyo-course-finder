@@ -37,6 +37,9 @@ python3 app.py
 # Search
 python3 cli.py search --department 文学部 --course-name 英語
 
+# Exhaustive multi-page scan with stderr progress and a 3-minute timeout
+python3 cli.py search --keyword ゼミ --semester 春学期 --all-pages --timeout 180
+
 # Syllabus detail
 python3 cli.py detail --code AF182
 
@@ -95,6 +98,8 @@ python3 cli.py search --department 文学部 --campus 池袋 --format 対面
 
 # 3. All output is structured JSON with {"ok": true/false, "data": ...}
 ```
+
+`cli.py schema` now marks each parameter with `server_side: true/false`. Parameters such as `semester`, `curriculum`, `exam_filter`, `no_test`, and `no_presentation` are local post-filters, so pair them with `--all-pages` when you need exhaustive matches across the full result set.
 
 ### For AI agents via Python import
 

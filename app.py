@@ -1,10 +1,51 @@
+import os
+
+import requests
+import sentry_sdk
 from flask import Flask, render_template, request, jsonify
 from scraper import (
-    search_courses, search_courses_page_with_evaluations, get_syllabus_detail,
+    search_courses, search_courses_page_with_evaluations, get_structured_syllabus_detail,
     GAKUBU_MAP, BUNRUI19_MAP, BUNRUI3_MAP, BUNRUI12_MAP, BUNRUI2_MAP,
 )
+from sentry_sdk.integrations.flask import FlaskIntegration
 
 app = Flask(__name__)
+
+
+def _get_float_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _init_sentry():
+    dsn = os.environ.get("SENTRY_DSN", "").strip()
+    if not dsn:
+        return
+
+    sentry_sdk.init(
+        dsn=dsn,
+        integrations=[FlaskIntegration()],
+        traces_sample_rate=_get_float_env("SENTRY_TRACES_SAMPLE_RATE", 0.0),
+        environment=(
+            os.environ.get("SENTRY_ENVIRONMENT")
+            or os.environ.get("RAILWAY_ENVIRONMENT_NAME")
+            or "production"
+        ),
+        release=os.environ.get("RAILWAY_GIT_COMMIT_SHA") or os.environ.get("SOURCE_VERSION"),
+        send_default_pii=False,
+    )
+
+
+def _get_cloudflare_web_analytics_token():
+    return os.environ.get("CLOUDFLARE_WEB_ANALYTICS_TOKEN", "").strip() or None
+
+
+_init_sentry()
 
 
 @app.after_request
@@ -17,12 +58,14 @@ def add_no_cache_headers(response):
 
 @app.route("/")
 def index():
+    cloudflare_web_analytics_token = _get_cloudflare_web_analytics_token()
     return render_template("index.html",
         gakubu_map=GAKUBU_MAP,
         bunrui19_map=BUNRUI19_MAP,
         bunrui3_map=BUNRUI3_MAP,
         bunrui12_map=BUNRUI12_MAP,
         bunrui2_map=BUNRUI2_MAP,
+        cloudflare_web_analytics_token=cloudflare_web_analytics_token,
     )
 
 
@@ -62,7 +105,11 @@ def api_search():
     try:
         results = search_courses(page=page, **kwargs)
         return jsonify(results)
+    except requests.exceptions.RequestException as e:
+        sentry_sdk.capture_exception(e)
+        return jsonify({"error": str(e)}), 502
     except Exception as e:
+        sentry_sdk.capture_exception(e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -123,7 +170,11 @@ def api_search_evaluation_page():
             **kwargs,
         )
         return jsonify(results)
+    except requests.exceptions.RequestException as e:
+        sentry_sdk.capture_exception(e)
+        return jsonify({"error": str(e)}), 502
     except Exception as e:
+        sentry_sdk.capture_exception(e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -134,13 +185,16 @@ def api_detail():
     if not nendo or not kodo_2:
         return jsonify({"error": "nendo and kodo_2 parameters required"}), 400
     try:
-        detail = get_syllabus_detail(nendo=nendo, kodo_2=kodo_2)
+        detail = get_structured_syllabus_detail(nendo=nendo, kodo_2=kodo_2)
         return jsonify(detail)
+    except requests.exceptions.RequestException as e:
+        sentry_sdk.capture_exception(e)
+        return jsonify({"error": str(e)}), 502
     except Exception as e:
+        sentry_sdk.capture_exception(e)
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 5050))
     app.run(debug=True, host="0.0.0.0", port=port)

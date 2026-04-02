@@ -26,9 +26,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = ["flask>=3.0"]
+web = ["flask>=3.0", "sentry-sdk[flask]>=2.0"]
 mcp = ["mcp[cli]>=1.0"]
-all = ["flask>=3.0", "mcp[cli]>=1.0"]
+all = ["flask>=3.0", "sentry-sdk[flask]>=2.0", "mcp[cli]>=1.0"]
 
 [project.scripts]
 rikkyo-syllabus = "cli:main"
