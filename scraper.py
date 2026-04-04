@@ -1311,7 +1311,6 @@ def search_courses_all_pages_with_evaluations_parallel(
         pages_completed += 1
         new_courses = sorted(page_matches[page], key=lambda course: course.get("source_order", 0))
         aggregated_courses.extend(new_courses)
-        aggregated_courses.sort(key=lambda course: course.get("source_order", 0))
         emit_progress(
             "page",
             page=page,
@@ -1369,19 +1368,21 @@ def search_courses_all_pages_with_evaluations_parallel(
                         evaluation = None
                     apply_evaluation(code, evaluation)
 
+    final_courses = sorted(aggregated_courses, key=lambda course: course.get("source_order", 0))
+
     emit_progress(
         "complete",
         total=total,
         max_page=max_page,
         pages_completed=pages_completed,
-        matched_total=len(aggregated_courses),
-        courses=[_copy_course(course) for course in aggregated_courses],
+        matched_total=len(final_courses),
+        courses=[_copy_course(course) for course in final_courses],
     )
     return {
         "total": total,
         "max_page": max_page,
         "pages_completed": pages_completed,
-        "courses": [_copy_course(course) for course in aggregated_courses],
+        "courses": [_copy_course(course) for course in final_courses],
     }
 
 

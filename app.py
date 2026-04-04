@@ -119,18 +119,27 @@ def _cleanup_evaluation_runs():
             _evaluation_runs.pop(run_id, None)
 
 
-def _serialize_evaluation_run(run):
-    courses = sorted(
-        [dict(course) for course in run.get("aggregated_courses", [])],
-        key=lambda course: course.get("source_order", 0),
-    )
+def _serialize_evaluation_run(run, known_count=0):
+    courses = [dict(course) for course in run.get("aggregated_courses", [])]
+    total_count = len(courses)
+
+    try:
+        known_count = max(0, int(known_count))
+    except (TypeError, ValueError):
+        known_count = 0
+
+    if known_count > total_count:
+        known_count = 0
+
+    new_courses = courses[known_count:]
     return {
         "run_id": run["id"],
         "completed": run.get("completed", False),
         "base_total": run.get("base_total", 0),
         "pages_completed": run.get("pages_completed", 0),
         "max_page": run.get("max_page", 1),
-        "aggregated_courses": courses,
+        "aggregated_count": total_count,
+        "new_courses": new_courses,
         "error": run.get("error"),
     }
 
@@ -149,6 +158,7 @@ def _run_evaluation_search(run_id, kwargs, exam_filter, exam_max, report_min):
                 run["pages_completed"] = event.get("pages_completed", run["pages_completed"])
                 run["max_page"] = event.get("max_page", run["max_page"])
                 run["aggregated_courses"].extend(event.get("new_courses", []))
+                run["aggregated_courses"].sort(key=lambda course: course.get("source_order", 0))
             elif event["event"] == "complete":
                 run["pages_completed"] = event.get("pages_completed", run["pages_completed"])
                 run["max_page"] = event.get("max_page", run["max_page"])
@@ -295,11 +305,12 @@ def api_start_evaluation_run():
 @app.route("/api/search/evaluation-run/<run_id>")
 def api_get_evaluation_run(run_id):
     _cleanup_evaluation_runs()
+    known_count = request.args.get("known_count", 0)
     with _evaluation_runs_lock:
         run = _evaluation_runs.get(run_id)
         if run is None:
             return jsonify({"error": "run not found"}), 404
-        payload = _serialize_evaluation_run(run)
+        payload = _serialize_evaluation_run(run, known_count=known_count)
     return jsonify(payload)
 
 

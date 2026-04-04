@@ -931,7 +931,7 @@ const DEFAULT_NENDO = "{{ default_nendo }}";
 const DAYS = ["月", "火", "水", "木", "金", "土"];
 const PERIODS = ["1", "2", "3", "4", "5", "6"];
 const PAGE_SIZE = 20;
-const EVAL_RUN_POLL_INTERVAL_MS = 800;
+const EVAL_RUN_POLL_INTERVAL_MS = 1200;
 
 let selectedSlots = new Set();
 let currentPage = 1;
@@ -939,6 +939,49 @@ let lastResults = null;
 let evalFilterMode = "all";
 let activeSearchRun = null;
 let currentSearchToken = 0;
+let activeSearchRequestController = null;
+let renderFrameHandle = null;
+let filteredCourseCache = {
+  sourceRef: null,
+  sourceCount: -1,
+  localKey: "",
+  mode: "",
+  courses: [],
+};
+let renderCache = {
+  countText: "",
+  bodyKey: "",
+  paginationKey: "",
+};
+
+function resetRenderCaches() {
+  filteredCourseCache = {
+    sourceRef: null,
+    sourceCount: -1,
+    localKey: "",
+    mode: "",
+    courses: [],
+  };
+  renderCache = {
+    countText: "",
+    bodyKey: "",
+    paginationKey: "",
+  };
+}
+
+function abortActiveSearchRequest() {
+  if (!activeSearchRequestController) return;
+  activeSearchRequestController.abort();
+  activeSearchRequestController = null;
+}
+
+function scheduleFilterAndRender() {
+  if (renderFrameHandle) return;
+  renderFrameHandle = window.requestAnimationFrame(() => {
+    renderFrameHandle = null;
+    filterAndRender();
+  });
+}
 
 function initTimeGrid() {
   const grid = document.getElementById("timeGrid");
@@ -984,7 +1027,7 @@ function toggleSlot(cell) {
     cell.classList.add("selected");
     cell.textContent = "\u2713";
   }
-  if (lastResults) filterAndRender();
+  if (lastResults) scheduleFilterAndRender();
 }
 
 function semesterTag(s) {
@@ -1065,6 +1108,7 @@ function needsAsyncEvaluationSearch() {
 }
 
 function cancelActiveSearch() {
+  abortActiveSearchRequest();
   if (!activeSearchRun) return;
   activeSearchRun.cancelled = true;
   if (activeSearchRun.pollTimer) {
@@ -1078,7 +1122,7 @@ function buildDisplayData() {
     return {
       mode: "async",
       base_total: activeSearchRun.baseTotal,
-      courses: activeSearchRun.aggregatedCourses.slice(),
+      courses: activeSearchRun.aggregatedCourses,
       progress: {
         completed: activeSearchRun.completed,
         pagesCompleted: activeSearchRun.pagesCompleted,
@@ -1093,8 +1137,10 @@ async function doSearch(page) {
   currentPage = page;
   currentSearchToken += 1;
   const token = currentSearchToken;
+  let controller = null;
 
   cancelActiveSearch();
+  resetRenderCaches();
   document.getElementById("emptyState").style.display = "none";
 
   if (needsAsyncEvaluationSearch()) {
@@ -1109,18 +1155,24 @@ async function doSearch(page) {
     const params = getBaseSearchParams();
     params.set("page", page);
 
-    const resp = await fetch("/api/search?" + params.toString());
+    controller = new AbortController();
+    activeSearchRequestController = controller;
+    const resp = await fetch("/api/search?" + params.toString(), { signal: controller.signal });
     const data = await resp.json();
     if (token !== currentSearchToken) return;
     if (data.error) throw new Error(data.error);
 
     lastResults = { ...data, mode: "normal" };
-    filterAndRender();
+    scheduleFilterAndRender();
   } catch (e) {
+    if (e.name === "AbortError") return;
     if (token !== currentSearchToken) return;
     showEmptyState("検索に失敗しました");
     alert("通信エラー: " + e.message);
   } finally {
+    if (activeSearchRequestController === controller) {
+      activeSearchRequestController = null;
+    }
     if (token === currentSearchToken) setLoadingState(false);
   }
 }
@@ -1129,13 +1181,17 @@ async function startAsyncEvaluationSearch(token) {
   hideEvalProgress();
   setLoadingState(true, "評価条件を準備中...");
   document.getElementById("resultsPanel").style.display = "none";
+  let controller = null;
 
   try {
     const payload = Object.fromEntries(getEvaluationParams());
+    controller = new AbortController();
+    activeSearchRequestController = controller;
     const runResp = await fetch("/api/search/evaluation-run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
     const runData = await runResp.json();
 
@@ -1157,15 +1213,20 @@ async function startAsyncEvaluationSearch(token) {
     lastResults = { mode: "async" };
 
     updateEvalProgress(activeSearchRun);
-    filterAndRender();
+    scheduleFilterAndRender();
     setLoadingState(false);
     pollEvaluationRun(activeSearchRun);
   } catch (e) {
+    if (e.name === "AbortError") return;
     if (token !== currentSearchToken) return;
     setLoadingState(false);
     hideEvalProgress();
     showEmptyState("検索に失敗しました");
     alert("通信エラー: " + e.message);
+  } finally {
+    if (activeSearchRequestController === controller) {
+      activeSearchRequestController = null;
+    }
   }
 }
 
@@ -1175,15 +1236,28 @@ function syncEvaluationRun(run, data) {
   run.maxPage = Math.max(data.max_page || 1, 1);
   run.completed = !!data.completed;
   run.error = data.error || null;
-  run.aggregatedCourses = (data.aggregated_courses || []).map((course, index) => ({
-    ...course,
-    discovered_order: course.discovered_order ?? index,
-  }));
+  const aggregatedCount = data.aggregated_count || 0;
+  if (aggregatedCount < run.aggregatedCourses.length) {
+    run.aggregatedCourses = [];
+  }
+
+  const baseIndex = run.aggregatedCourses.length;
+  (data.new_courses || []).forEach((course, index) => {
+    course._scheduleText = course.schedule || "";
+    course._semesterText = course.semester || "";
+    course._uiOrder = course.discovered_order ?? course.source_order ?? (baseIndex + index);
+    run.aggregatedCourses.push(course);
+  });
 }
 
 async function pollEvaluationRun(run) {
+  let controller = null;
   try {
-    const resp = await fetch(`/api/search/evaluation-run/${run.runId}`);
+    controller = new AbortController();
+    activeSearchRequestController = controller;
+    const resp = await fetch(`/api/search/evaluation-run/${run.runId}?known_count=${run.aggregatedCourses.length}`, {
+      signal: controller.signal,
+    });
     const data = await resp.json();
 
     if (!activeSearchRun || activeSearchRun.id !== run.id || run.cancelled) return;
@@ -1196,23 +1270,28 @@ async function pollEvaluationRun(run) {
     }
     if (data.error) throw new Error(data.error);
 
-    const snapshotKey = `${data.pages_completed}:${(data.aggregated_courses || []).length}:${data.completed ? 1 : 0}`;
+    const snapshotKey = `${data.pages_completed}:${data.aggregated_count || 0}:${data.completed ? 1 : 0}`;
     const changed = snapshotKey !== run.lastSnapshotKey;
     syncEvaluationRun(run, data);
     run.lastSnapshotKey = snapshotKey;
 
     if (changed) {
       updateEvalProgress(run);
-      filterAndRender();
+      scheduleFilterAndRender();
     }
 
     if (!run.completed) {
       run.pollTimer = window.setTimeout(() => pollEvaluationRun(run), EVAL_RUN_POLL_INTERVAL_MS);
     }
   } catch (e) {
+    if (e.name === "AbortError") return;
     if (activeSearchRun && activeSearchRun.id === run.id && !run.cancelled) {
       console.error(e);
       run.pollTimer = window.setTimeout(() => pollEvaluationRun(run), EVAL_RUN_POLL_INTERVAL_MS);
+    }
+  } finally {
+    if (activeSearchRequestController === controller) {
+      activeSearchRequestController = null;
     }
   }
 }
@@ -1227,7 +1306,7 @@ function setEvalFilter(mode) {
 function applyEvalSort() {
   if (buildDisplayData()?.mode === "async") {
     currentPage = 1;
-    filterAndRender();
+    scheduleFilterAndRender();
   }
 }
 
@@ -1248,20 +1327,40 @@ function sortAsyncCourses(courses) {
       return (a.code || "").localeCompare(b.code || "", "ja")
         || (a.source_order || 0) - (b.source_order || 0);
     }
-    return (a.discovered_order || 0) - (b.discovered_order || 0);
+    return (a._uiOrder || a.source_order || 0) - (b._uiOrder || b.source_order || 0);
   });
 
   return sorted;
 }
 
-function applyLocalFilters(courses) {
+function getSelectedSemesters() {
+  return [...document.querySelectorAll("#semesterChecks input:checked")].map(checkbox => checkbox.value);
+}
+
+function buildLocalFilterKey(data, selectedSemesters) {
+  const semestersKey = [...selectedSemesters].sort().join("|");
+  const slotsKey = [...selectedSlots].sort().join("|");
+  const sortKey = data.mode === "async" ? document.getElementById("evalSortMode").value : "";
+  return `${semestersKey}::${slotsKey}::${sortKey}`;
+}
+
+function prepareCoursesForUi(courses) {
+  courses.forEach((course, index) => {
+    if (course._preparedForUi) return;
+    course._preparedForUi = true;
+    course._scheduleText = course.schedule || "";
+    course._semesterText = course.semester || "";
+    course._uiOrder = course.discovered_order ?? course.source_order ?? index;
+  });
+}
+
+function applyLocalFilters(courses, selectedSemesters) {
   let filtered = courses.slice();
-  const checks = document.querySelectorAll("#semesterChecks input:checked");
-  const allowedSemesters = new Set([...checks].map(c => c.value));
+  const allowedSemesters = new Set(selectedSemesters);
 
   if (selectedSlots.size > 0) {
     filtered = filtered.filter(course => {
-      const schedule = course.schedule || "";
+      const schedule = course._scheduleText || "";
       for (const slot of selectedSlots) {
         if (schedule.includes(slot)) return true;
       }
@@ -1272,13 +1371,43 @@ function applyLocalFilters(courses) {
   if (allowedSemesters.size < 3) {
     filtered = filtered.filter(course => {
       for (const semester of allowedSemesters) {
-        if ((course.semester || "").includes(semester)) return true;
+        if ((course._semesterText || "").includes(semester)) return true;
       }
       return false;
     });
   }
 
   return filtered;
+}
+
+function getFilteredCourses(data) {
+  const rawCourses = data.courses || [];
+  const selectedSemesters = getSelectedSemesters();
+  const localKey = buildLocalFilterKey(data, selectedSemesters);
+
+  if (
+    filteredCourseCache.sourceRef === rawCourses
+    && filteredCourseCache.sourceCount === rawCourses.length
+    && filteredCourseCache.localKey === localKey
+    && filteredCourseCache.mode === data.mode
+  ) {
+    return filteredCourseCache.courses;
+  }
+
+  prepareCoursesForUi(rawCourses);
+  let filteredCourses = applyLocalFilters(rawCourses, selectedSemesters);
+  if (data.mode === "async") {
+    filteredCourses = sortAsyncCourses(filteredCourses);
+  }
+
+  filteredCourseCache = {
+    sourceRef: rawCourses,
+    sourceCount: rawCourses.length,
+    localKey,
+    mode: data.mode,
+    courses: filteredCourses,
+  };
+  return filteredCourses;
 }
 
 function evalTagHtml(course) {
@@ -1318,11 +1447,7 @@ function filterAndRender() {
   if (!data) return;
 
   const rawCourses = data.courses || [];
-  let filteredCourses = applyLocalFilters(rawCourses);
-  if (data.mode === "async") {
-    filteredCourses = sortAsyncCourses(filteredCourses);
-  }
-
+  const filteredCourses = getFilteredCourses(data);
   renderResults(data, filteredCourses, rawCourses.length);
 }
 
@@ -1349,10 +1474,31 @@ function renderRows(courses) {
   }).join("");
 }
 
+function buildRowsKey(courses, extra = "") {
+  return `${extra}::${courses.map(course => [
+    course.code || "",
+    course.source_order || 0,
+    course.evaluation?.exam_pct || 0,
+    course.evaluation?.report_pct || 0,
+  ].join(":")).join("|")}`;
+}
+
+function setCountText(text) {
+  const count = document.getElementById("resultsCount");
+  if (renderCache.countText === text) return;
+  count.textContent = text;
+  renderCache.countText = text;
+}
+
+function setResultsBody(html, key) {
+  const body = document.getElementById("resultsBody");
+  if (renderCache.bodyKey === key) return;
+  body.innerHTML = html;
+  renderCache.bodyKey = key;
+}
+
 function renderResults(data, courses, rawCount) {
   const panel = document.getElementById("resultsPanel");
-  const body = document.getElementById("resultsBody");
-  const count = document.getElementById("resultsCount");
 
   if (data.mode === "async") {
     const progress = data.progress;
@@ -1375,17 +1521,17 @@ function renderResults(data, courses, rawCount) {
 
     document.getElementById("emptyState").style.display = "none";
     panel.style.display = "block";
-    count.textContent = `${statusText}${localFilteredText} / ページ${currentPage}`;
+    setCountText(`${statusText}${localFilteredText} / ページ${currentPage}`);
 
     if (pageCourses.length === 0) {
-      body.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-light);">
+      setResultsBody(`<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-light);">
         ${progress.completed ? "このページには結果がありません。" : "このページの結果を検索中です。しばらくお待ちください..."}
-      </td></tr>`;
+      </td></tr>`, `empty:${progress.completed ? 1 : 0}:${currentPage}:${courses.length}`);
       renderPagination(data, courses.length);
       return;
     }
 
-    body.innerHTML = renderRows(pageCourses);
+    setResultsBody(renderRows(pageCourses), buildRowsKey(pageCourses, `async:${currentPage}`));
     renderPagination(data, courses.length);
     return;
   }
@@ -1397,58 +1543,63 @@ function renderResults(data, courses, rawCount) {
 
   document.getElementById("emptyState").style.display = "none";
   panel.style.display = "block";
-  const localFiltersActive = selectedSlots.size > 0 || document.querySelectorAll("#semesterChecks input:checked").length < 3;
+  const localFiltersActive = selectedSlots.size > 0 || getSelectedSemesters().length < 3;
   const localFilteredText = localFiltersActive ? ` / 表示${courses.length}件` : "";
-  count.textContent = `全${data.total}件 / ページ${currentPage}${localFilteredText}`;
-  body.innerHTML = renderRows(courses);
+  setCountText(`全${data.total}件 / ページ${currentPage}${localFilteredText}`);
+  setResultsBody(renderRows(courses), buildRowsKey(courses, `normal:${currentPage}`));
   renderPagination(data, courses.length);
 }
 
 function renderPagination(data, filteredCount) {
   const container = document.getElementById("pagination");
+  let html = "";
+  let key = "";
 
   if (data.mode === "async") {
     const hasPrev = currentPage > 1;
     const hasNext = filteredCount > currentPage * PAGE_SIZE || !data.progress.completed;
-    container.innerHTML = `
+    html = `
       <button ${hasPrev ? "" : "disabled"} onclick="changeAsyncPage(${currentPage - 1})">前へ</button>
       <button class="active" disabled>${currentPage}</button>
       <button ${hasNext ? "" : "disabled"} onclick="changeAsyncPage(${currentPage + 1})">次へ</button>
     `;
-    return;
+    key = `async:${currentPage}:${filteredCount}:${data.progress.completed ? 1 : 0}`;
+  } else {
+    const maxPage = data.max_page || 1;
+    if (maxPage <= 1) {
+      html = "";
+      key = "normal:empty";
+    } else {
+      html += `<button ${currentPage <= 1 ? "disabled" : ""} onclick="doSearch(${currentPage - 1})">前へ</button>`;
+
+      const pageWindow = window.matchMedia("(max-width: 768px)").matches ? 1 : 4;
+      const start = Math.max(1, currentPage - pageWindow);
+      const end = Math.min(maxPage, currentPage + pageWindow);
+
+      if (start > 1) html += `<button onclick="doSearch(1)">1</button>`;
+      if (start > 2) html += `<button disabled>...</button>`;
+
+      for (let i = start; i <= end; i++) {
+        html += `<button class="${i === currentPage ? "active" : ""}" onclick="doSearch(${i})">${i}</button>`;
+      }
+
+      if (end < maxPage - 1) html += `<button disabled>...</button>`;
+      if (end < maxPage) html += `<button onclick="doSearch(${maxPage})">${maxPage}</button>`;
+
+      html += `<button ${currentPage >= maxPage ? "disabled" : ""} onclick="doSearch(${currentPage + 1})">次へ</button>`;
+      key = `normal:${currentPage}:${maxPage}`;
+    }
   }
 
-  const maxPage = data.max_page || 1;
-  if (maxPage <= 1) {
-    container.innerHTML = "";
-    return;
-  }
-
-  let html = "";
-  html += `<button ${currentPage <= 1 ? "disabled" : ""} onclick="doSearch(${currentPage - 1})">前へ</button>`;
-
-  const pageWindow = window.matchMedia("(max-width: 768px)").matches ? 1 : 4;
-  const start = Math.max(1, currentPage - pageWindow);
-  const end = Math.min(maxPage, currentPage + pageWindow);
-
-  if (start > 1) html += `<button onclick="doSearch(1)">1</button>`;
-  if (start > 2) html += `<button disabled>...</button>`;
-
-  for (let i = start; i <= end; i++) {
-    html += `<button class="${i === currentPage ? "active" : ""}" onclick="doSearch(${i})">${i}</button>`;
-  }
-
-  if (end < maxPage - 1) html += `<button disabled>...</button>`;
-  if (end < maxPage) html += `<button onclick="doSearch(${maxPage})">${maxPage}</button>`;
-
-  html += `<button ${currentPage >= maxPage ? "disabled" : ""} onclick="doSearch(${currentPage + 1})">次へ</button>`;
+  if (renderCache.paginationKey === key) return;
   container.innerHTML = html;
+  renderCache.paginationKey = key;
 }
 
 function changeAsyncPage(page) {
   if (page < 1) return;
   currentPage = page;
-  filterAndRender();
+  scheduleFilterAndRender();
 }
 
 async function showDetail(code, name) {
@@ -1630,6 +1781,7 @@ document.getElementById("modalOverlay").addEventListener("click", event => {
 function clearForm() {
   currentSearchToken += 1;
   cancelActiveSearch();
+  resetRenderCaches();
 
   document.querySelectorAll(".search-grid input").forEach(el => { el.value = ""; });
   document.querySelectorAll(".search-grid select").forEach(el => { el.selectedIndex = 0; });
@@ -1654,7 +1806,7 @@ function clearForm() {
 
 document.querySelectorAll("#semesterChecks input").forEach(checkbox => {
   checkbox.addEventListener("change", () => {
-    if (lastResults) filterAndRender();
+    if (lastResults) scheduleFilterAndRender();
   });
 });
 
