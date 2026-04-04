@@ -50,7 +50,7 @@ def search_courses(
     category: str = "",
     format: str = "",
     registration: str = "",
-    year: str = "2026",
+    year: str = "2025",
     course_code: str = "",
     numbering: str = "",
     keyword_1: str = "",
@@ -67,7 +67,7 @@ def search_courses(
         category: Category / 分類 (e.g. "大学", "大学院（前期課程）").
         format: Class format / 授業形態 (e.g. "対面（全回対面）", "オンライン（全回オンライン）").
         registration: Registration method / 登録方法 (e.g. "抽選登録", "科目コード登録").
-        year: Academic year / 年度 (default "2026").
+        year: Academic year / 年度 (default "2025").
         course_code: Course code / 科目コード.
         numbering: Numbering code / ナンバリング.
         keyword_1: Keyword 1 / キーワード1.
@@ -106,7 +106,7 @@ def search_with_evaluation(
     category: str = "",
     format: str = "",
     registration: str = "",
-    year: str = "2026",
+    year: str = "2025",
     course_code: str = "",
     numbering: str = "",
     keyword_1: str = "",
@@ -156,12 +156,12 @@ def search_with_evaluation(
 
 
 @mcp.tool()
-def get_detail(code: str, year: str = "2026") -> str:
+def get_detail(code: str, year: str = "2025") -> str:
     """Get full syllabus detail for a course (科目のシラバス詳細を取得).
 
     Parameters:
         code: Course code / 科目コード (required).
-        year: Academic year / 年度 (default "2026").
+        year: Academic year / 年度 (default "2025").
 
     Returns JSON with stable top-level keys plus `detail_fields` / `raw_detail`.
     """
@@ -183,7 +183,7 @@ def search_and_get_details(
     category: str = "",
     format: str = "",
     registration: str = "",
-    year: str = "2026",
+    year: str = "2025",
     course_code: str = "",
     numbering: str = "",
     keyword_1: str = "",
@@ -246,12 +246,12 @@ def natural_language_search(query: str, page: int = 1) -> str:
 
 
 @mcp.tool()
-def compare(codes: str, year: str = "2026") -> str:
+def compare(codes: str, year: str = "2025") -> str:
     """Compare multiple courses side by side (複数科目の比較).
 
     Parameters:
         codes: Comma-separated course codes (e.g. "AA001,AB002,AC003").
-        year: Academic year / 年度 (default "2026").
+        year: Academic year / 年度 (default "2025").
 
     Returns JSON with comparison data for the specified courses.
     """

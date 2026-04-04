@@ -257,7 +257,7 @@ def _jp_text(td):
 
 
 def build_search_params(
-    nendo="2026",
+    nendo="2025",
     gakubu="",
     kamokumei="",
     search_kamokumei="search_partial-match",
@@ -1177,7 +1177,7 @@ def filter_courses_advanced(
 
 
 def search_courses_page_with_evaluations(page=1, exam_filter="all", exam_max=100, report_min=0, **kwargs):
-    nendo = kwargs.get("nendo", "2026")
+    nendo = kwargs.get("nendo", "2025")
     page_result = search_courses(page=page, **kwargs)
     enriched_courses = attach_evaluations_to_courses(page_result["courses"], nendo)
     filtered_courses = filter_courses_by_evaluation(
@@ -1210,7 +1210,7 @@ def search_courses_advanced(
     progress_callback=None,
     **kwargs,
 ):
-    nendo = kwargs.get("nendo", "2026")
+    nendo = kwargs.get("nendo", "2025")
     semester_filters = semester_filters or []
     curriculum_filters = curriculum_filters or []
 
@@ -1534,7 +1534,7 @@ def search_and_detail(top_n=5, include_detail=True, **kwargs):
     """
     try:
         params = resolve_params(**kwargs)
-        nendo = params.get("nendo", "2026")
+        nendo = params.get("nendo", "2025")
         result = search_courses(page=1, **params)
 
         if result["total"] == 0:
@@ -1621,7 +1621,7 @@ def _search_courses_with_details(
     **kwargs,
 ):
     params = resolve_params(**kwargs)
-    nendo = params.get("nendo", "2026")
+    nendo = params.get("nendo", "2025")
     search_result = search_courses_advanced(
         page=page,
         all_pages=all_pages,
@@ -1708,7 +1708,7 @@ def search_and_detail_parallel(
 # Course comparison & schedule conflict detection
 # ---------------------------------------------------------------------------
 
-def compare_courses(codes, nendo="2026", fields=None):
+def compare_courses(codes, nendo="2025", fields=None):
     """Compare multiple courses side by side.
 
     Args:
