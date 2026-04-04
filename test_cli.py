@@ -127,6 +127,52 @@ class ScraperFeatureTests(unittest.TestCase):
         self.assertEqual(result["stopped_reason"], "timeout")
         self.assertEqual([event["event"] for event in events], ["start", "page", "timeout", "complete"])
 
+    @patch("scraper._fetch_evaluation")
+    @patch("scraper.search_courses")
+    def test_parallel_evaluation_search_reports_progress_and_preserves_order(self, mock_search_courses, mock_fetch_evaluation):
+        with scraper._eval_cache_lock:
+            scraper._eval_cache.clear()
+        with scraper._detail_bundle_cache_lock:
+            scraper._detail_bundle_cache.clear()
+
+        mock_search_courses.side_effect = [
+            {
+                "total": 40,
+                "max_page": 2,
+                "courses": [
+                    {"code": "A1", "name": "A", "semester": "春学期"},
+                    {"code": "B1", "name": "B", "semester": "春学期"},
+                ],
+            },
+            {
+                "total": 40,
+                "max_page": 2,
+                "courses": [
+                    {"code": "C1", "name": "C", "semester": "秋学期"},
+                ],
+            },
+        ]
+
+        eval_map = {
+            "A1": {"exam_pct": 0, "report_pct": 0, "in_class_pct": 100, "has_exam": False, "has_report": False},
+            "B1": {"exam_pct": 70, "report_pct": 0, "in_class_pct": 30, "has_exam": True, "has_report": False},
+            "C1": {"exam_pct": 0, "report_pct": 20, "in_class_pct": 100, "has_exam": False, "has_report": True},
+        }
+        mock_fetch_evaluation.side_effect = lambda _nendo, code: eval_map.get(code)
+
+        events = []
+        result = scraper.search_courses_all_pages_with_evaluations_parallel(
+            exam_filter="no-exam",
+            progress_callback=events.append,
+            nendo="2026",
+        )
+
+        self.assertEqual([course["code"] for course in result["courses"]], ["A1", "C1"])
+        self.assertEqual(result["pages_completed"], 2)
+        self.assertEqual(events[0]["event"], "start")
+        self.assertEqual(events[-1]["event"], "complete")
+        self.assertEqual(sum(1 for event in events if event["event"] == "page"), 2)
+
 
 class CliFeatureTests(unittest.TestCase):
     @patch("cli.safe_search_advanced")

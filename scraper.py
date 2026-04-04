@@ -2,6 +2,7 @@ import copy
 import re
 import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -16,6 +17,8 @@ SEARCH_PAGE_SIZE = 20
 UPSTREAM_RETRY_COUNT = 3
 UPSTREAM_RETRY_BACKOFF = 0.5
 RETRYABLE_STATUS_CODES = (408, 429, 500, 502, 503, 504)
+SEARCH_PAGE_FETCH_WORKERS = 4
+EVALUATION_FETCH_WORKERS = 10
 
 _thread_local = threading.local()
 
@@ -956,14 +959,34 @@ def _set_cached_evaluation(nendo, code, evaluation):
         _eval_cache[cache_key] = dict(evaluation)
 
 
+def _get_cached_evaluation_from_bundle(nendo, code):
+    bundle = _get_cached_detail_bundle(nendo, code)
+    if not isinstance(bundle, dict):
+        return None
+
+    evaluation = bundle.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return None
+
+    _set_cached_evaluation(nendo, code, evaluation)
+    return dict(evaluation)
+
+
 def _fetch_evaluation(nendo, code):
     cached = _get_cached_evaluation(nendo, code)
     if cached is not None:
         return cached
 
+    cached_from_bundle = _get_cached_evaluation_from_bundle(nendo, code)
+    if cached_from_bundle is not None:
+        return cached_from_bundle
+
     try:
-        bundle = _fetch_detail_bundle(nendo, code)
-        evaluation = bundle.get("evaluation")
+        url = f"{BASE_URL}/preview.php?nendo={nendo}&kodo_2={code}"
+        resp = _request("GET", url)
+        evaluation = _parse_evaluation_info(resp.text)
+        if isinstance(evaluation, dict):
+            _set_cached_evaluation(nendo, code, evaluation)
         return dict(evaluation) if isinstance(evaluation, dict) else None
     except Exception:
         return None
@@ -1025,6 +1048,23 @@ def get_evaluation_batch(nendo, codes):
                 pass
 
     return results
+
+
+def attach_evaluation_only_to_courses(courses, nendo):
+    codes = [course["code"] for course in courses if course.get("code")]
+    evaluations = get_evaluation_batch(nendo, codes)
+
+    enriched_courses = []
+    for index, course in enumerate(courses):
+        enriched_course = _copy_course(course)
+        evaluation = evaluations.get(course.get("code"))
+        if evaluation is not None:
+            enriched_course["evaluation"] = dict(evaluation)
+            enriched_course["has_test"] = bool(evaluation.get("has_test"))
+            enriched_course["has_presentation"] = bool(evaluation.get("has_presentation"))
+        enriched_course["source_order"] = index
+        enriched_courses.append(enriched_course)
+    return enriched_courses
 
 
 def _matches_evaluation_filter(evaluation, exam_filter, exam_max, report_min=0):
@@ -1179,7 +1219,7 @@ def filter_courses_advanced(
 def search_courses_page_with_evaluations(page=1, exam_filter="all", exam_max=100, report_min=0, **kwargs):
     nendo = kwargs.get("nendo", "2026")
     page_result = search_courses(page=page, **kwargs)
-    enriched_courses = attach_evaluations_to_courses(page_result["courses"], nendo)
+    enriched_courses = attach_evaluation_only_to_courses(page_result["courses"], nendo)
     filtered_courses = filter_courses_by_evaluation(
         enriched_courses,
         exam_filter=exam_filter,
@@ -1192,6 +1232,156 @@ def search_courses_page_with_evaluations(page=1, exam_filter="all", exam_max=100
         "total": page_result["total"],
         "max_page": page_result["max_page"],
         "courses": filtered_courses,
+    }
+
+
+def search_courses_all_pages_with_evaluations_parallel(
+    exam_filter="all",
+    exam_max=100,
+    report_min=0,
+    progress_callback=None,
+    **kwargs,
+):
+    nendo = kwargs.get("nendo", "2026")
+
+    def emit_progress(event, **extra):
+        if progress_callback is None:
+            return
+        payload = {
+            "event": event,
+            **extra,
+        }
+        try:
+            progress_callback(payload)
+        except Exception:
+            pass
+
+    first_page_result = search_courses(page=1, **kwargs)
+    max_page = first_page_result["max_page"]
+    total = first_page_result["total"]
+
+    emit_progress("start", total=total, max_page=max_page, pages_completed=0, matched_total=0)
+
+    if total == 0:
+        emit_progress("complete", total=0, max_page=1, pages_completed=0, matched_total=0, courses=[])
+        return {
+            "total": 0,
+            "max_page": 1,
+            "pages_completed": 0,
+            "courses": [],
+        }
+
+    page_results = {1: first_page_result}
+    if max_page > 1:
+        worker_count = min(SEARCH_PAGE_FETCH_WORKERS, max_page - 1)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(search_courses, page=page, **kwargs): page
+                for page in range(2, max_page + 1)
+            }
+            for future in as_completed(futures):
+                page = futures[future]
+                page_results[page] = future.result()
+
+    page_courses = {}
+    page_matches = {page: [] for page in range(1, max_page + 1)}
+    page_pending = {}
+    code_to_refs = defaultdict(list)
+
+    for page in range(1, max_page + 1):
+        courses = []
+        for index, course in enumerate(page_results.get(page, {}).get("courses", [])):
+            enriched_course = _copy_course(course)
+            enriched_course["source_order"] = (page - 1) * SEARCH_PAGE_SIZE + index
+            courses.append(enriched_course)
+            code = enriched_course.get("code")
+            if code:
+                code_to_refs[code].append((page, len(courses) - 1))
+        page_courses[page] = courses
+        page_pending[page] = len([course for course in courses if course.get("code")])
+
+    aggregated_courses = []
+    pages_completed = 0
+
+    def finalize_page(page):
+        nonlocal pages_completed
+        if page_pending.get(page, 0) != 0:
+            return
+        page_pending[page] = -1
+        pages_completed += 1
+        new_courses = sorted(page_matches[page], key=lambda course: course.get("source_order", 0))
+        aggregated_courses.extend(new_courses)
+        aggregated_courses.sort(key=lambda course: course.get("source_order", 0))
+        emit_progress(
+            "page",
+            page=page,
+            max_page=max_page,
+            pages_completed=pages_completed,
+            matched_total=len(aggregated_courses),
+            new_courses=[_copy_course(course) for course in new_courses],
+        )
+
+    for page in range(1, max_page + 1):
+        if page_pending[page] == 0:
+            finalize_page(page)
+
+    if code_to_refs:
+        cached_evaluations = {}
+        uncached_codes = []
+        for code in code_to_refs:
+            cached = _get_cached_evaluation(nendo, code)
+            if cached is None:
+                cached = _get_cached_evaluation_from_bundle(nendo, code)
+            if cached is None:
+                uncached_codes.append(code)
+            else:
+                cached_evaluations[code] = cached
+
+        def apply_evaluation(code, evaluation):
+            refs = code_to_refs.get(code, [])
+            for page, index in refs:
+                course = page_courses[page][index]
+                if evaluation is not None:
+                    course["evaluation"] = dict(evaluation)
+                    course["has_test"] = bool(evaluation.get("has_test"))
+                    course["has_presentation"] = bool(evaluation.get("has_presentation"))
+                if _matches_evaluation_filter(evaluation, exam_filter, exam_max, report_min=report_min):
+                    page_matches[page].append(course)
+                page_pending[page] -= 1
+                if page_pending[page] == 0:
+                    finalize_page(page)
+
+        for code, evaluation in cached_evaluations.items():
+            apply_evaluation(code, evaluation)
+
+        if uncached_codes:
+            worker_count = min(EVALUATION_FETCH_WORKERS, len(uncached_codes))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(_fetch_evaluation, nendo, code): code
+                    for code in uncached_codes
+                }
+                for future in as_completed(futures):
+                    code = futures[future]
+                    try:
+                        evaluation = future.result()
+                    except Exception:
+                        evaluation = None
+                    apply_evaluation(code, evaluation)
+
+    emit_progress(
+        "complete",
+        total=total,
+        max_page=max_page,
+        pages_completed=pages_completed,
+        matched_total=len(aggregated_courses),
+        courses=[_copy_course(course) for course in aggregated_courses],
+    )
+    return {
+        "total": total,
+        "max_page": max_page,
+        "pages_completed": pages_completed,
+        "courses": [_copy_course(course) for course in aggregated_courses],
     }
 
 

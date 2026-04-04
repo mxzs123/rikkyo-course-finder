@@ -931,7 +931,7 @@ const DEFAULT_NENDO = "{{ default_nendo }}";
 const DAYS = ["月", "火", "水", "木", "金", "土"];
 const PERIODS = ["1", "2", "3", "4", "5", "6"];
 const PAGE_SIZE = 20;
-const ASYNC_PAGE_CONCURRENCY = 3;
+const EVAL_RUN_POLL_INTERVAL_MS = 800;
 
 let selectedSlots = new Set();
 let currentPage = 1;
@@ -1067,7 +1067,9 @@ function needsAsyncEvaluationSearch() {
 function cancelActiveSearch() {
   if (!activeSearchRun) return;
   activeSearchRun.cancelled = true;
-  activeSearchRun.controllers.forEach(controller => controller.abort());
+  if (activeSearchRun.pollTimer) {
+    clearTimeout(activeSearchRun.pollTimer);
+  }
   activeSearchRun = null;
 }
 
@@ -1129,31 +1131,35 @@ async function startAsyncEvaluationSearch(token) {
   document.getElementById("resultsPanel").style.display = "none";
 
   try {
-    const baseParams = getBaseSearchParams();
-    const baseResp = await fetch("/api/search?" + new URLSearchParams({ ...Object.fromEntries(baseParams), page: 1 }).toString());
-    const baseData = await baseResp.json();
+    const payload = Object.fromEntries(getEvaluationParams());
+    const runResp = await fetch("/api/search/evaluation-run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const runData = await runResp.json();
 
     if (token !== currentSearchToken) return;
-    if (baseData.error) throw new Error(baseData.error);
+    if (runData.error) throw new Error(runData.error);
 
     activeSearchRun = {
       id: token,
-      controllers: [],
+      runId: runData.run_id,
+      pollTimer: null,
       aggregatedCourses: [],
       pagesCompleted: 0,
-      maxPage: baseData.max_page,
-      baseTotal: baseData.total,
+      maxPage: 1,
+      baseTotal: 0,
       completed: false,
       cancelled: false,
-      discoveryCounter: 0,
-      seenKeys: new Set(),
+      lastSnapshotKey: "",
     };
     lastResults = { mode: "async" };
 
     updateEvalProgress(activeSearchRun);
     filterAndRender();
     setLoadingState(false);
-    runAsyncEvaluationQueue(activeSearchRun);
+    pollEvaluationRun(activeSearchRun);
   } catch (e) {
     if (token !== currentSearchToken) return;
     setLoadingState(false);
@@ -1163,65 +1169,51 @@ async function startAsyncEvaluationSearch(token) {
   }
 }
 
-function runAsyncEvaluationQueue(run) {
-  let nextPage = 1;
-  let inFlight = 0;
-
-  const launchNext = () => {
-    if (!activeSearchRun || activeSearchRun.id !== run.id || run.cancelled) return;
-
-    while (inFlight < ASYNC_PAGE_CONCURRENCY && nextPage <= run.maxPage) {
-      const page = nextPage;
-      nextPage += 1;
-      inFlight += 1;
-      fetchAsyncEvaluationPage(run, page).finally(() => {
-        inFlight -= 1;
-        if (!activeSearchRun || activeSearchRun.id !== run.id || run.cancelled) return;
-
-        if (nextPage > run.maxPage && inFlight === 0) {
-          run.completed = true;
-          updateEvalProgress(run);
-          filterAndRender();
-          return;
-        }
-        launchNext();
-      });
-    }
-  };
-
-  launchNext();
+function syncEvaluationRun(run, data) {
+  run.baseTotal = data.base_total || 0;
+  run.pagesCompleted = data.pages_completed || 0;
+  run.maxPage = Math.max(data.max_page || 1, 1);
+  run.completed = !!data.completed;
+  run.error = data.error || null;
+  run.aggregatedCourses = (data.aggregated_courses || []).map((course, index) => ({
+    ...course,
+    discovered_order: course.discovered_order ?? index,
+  }));
 }
 
-async function fetchAsyncEvaluationPage(run, page) {
-  const controller = new AbortController();
-  run.controllers.push(controller);
-
+async function pollEvaluationRun(run) {
   try {
-    const params = getEvaluationParams();
-    params.set("page", page);
-    const resp = await fetch("/api/search/evaluation-page?" + params.toString(), { signal: controller.signal });
+    const resp = await fetch(`/api/search/evaluation-run/${run.runId}`);
     const data = await resp.json();
 
     if (!activeSearchRun || activeSearchRun.id !== run.id || run.cancelled) return;
+    if (data.error && data.completed) {
+      hideEvalProgress();
+      showEmptyState("検索に失敗しました");
+      alert("通信エラー: " + data.error);
+      activeSearchRun = null;
+      return;
+    }
     if (data.error) throw new Error(data.error);
 
-    data.courses.forEach((course, index) => {
-      const key = `${page}:${course.code || index}`;
-      if (run.seenKeys.has(key)) return;
-      run.seenKeys.add(key);
-      course.source_order = (page - 1) * PAGE_SIZE + (course.source_order ?? index);
-      course.discovered_order = run.discoveryCounter++;
-      run.aggregatedCourses.push(course);
-    });
-  } catch (e) {
-    if (e.name !== "AbortError" && activeSearchRun && activeSearchRun.id === run.id) {
-      console.error(e);
+    const snapshotKey = `${data.pages_completed}:${(data.aggregated_courses || []).length}:${data.completed ? 1 : 0}`;
+    const changed = snapshotKey !== run.lastSnapshotKey;
+    syncEvaluationRun(run, data);
+    run.lastSnapshotKey = snapshotKey;
+
+    if (changed) {
+      updateEvalProgress(run);
+      filterAndRender();
     }
-  } finally {
-    if (!activeSearchRun || activeSearchRun.id !== run.id || run.cancelled) return;
-    run.pagesCompleted += 1;
-    updateEvalProgress(run);
-    filterAndRender();
+
+    if (!run.completed) {
+      run.pollTimer = window.setTimeout(() => pollEvaluationRun(run), EVAL_RUN_POLL_INTERVAL_MS);
+    }
+  } catch (e) {
+    if (activeSearchRun && activeSearchRun.id === run.id && !run.cancelled) {
+      console.error(e);
+      run.pollTimer = window.setTimeout(() => pollEvaluationRun(run), EVAL_RUN_POLL_INTERVAL_MS);
+    }
   }
 }
 
