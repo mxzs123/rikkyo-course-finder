@@ -30,7 +30,7 @@ _detail_bundle_cache_lock = threading.Lock()
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Origin": "https://sy.rikkyo.ac.jp",
-    "Referer": f"{BASE_URL}/web_search.php?&nendo=2026&t_mode=pc&gakubu=",
+    "Referer": f"{BASE_URL}/web_search.php?&nendo=2025&t_mode=pc&gakubu=",
     "Content-Type": "application/x-www-form-urlencoded",
 }
 
