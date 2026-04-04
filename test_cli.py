@@ -60,7 +60,7 @@ class ScraperFeatureTests(unittest.TestCase):
 
     def test_structured_detail_uses_canonical_keys(self):
         bundle = scraper._build_detail_bundle_from_html(DETAIL_HTML)
-        detail = scraper._build_structured_syllabus_detail(bundle, nendo="2025", kodo_2="AF182")
+        detail = scraper._build_structured_syllabus_detail(bundle, nendo="2026", kodo_2="AF182")
 
         self.assertEqual(detail["code"], "AF182")
         self.assertEqual(detail["semester"], "春学期")
@@ -91,7 +91,7 @@ class ScraperFeatureTests(unittest.TestCase):
             max_results=2,
             semester_filters=["春学期"],
             no_test=True,
-            nendo="2025",
+            nendo="2026",
         )
 
         self.assertEqual([course["code"] for course in result["courses"]], ["A1", "C1"])
@@ -118,7 +118,7 @@ class ScraperFeatureTests(unittest.TestCase):
             all_pages=True,
             timeout_seconds=5,
             progress_callback=events.append,
-            nendo="2025",
+            nendo="2026",
         )
 
         self.assertEqual(result["pages_fetched"], 1)
