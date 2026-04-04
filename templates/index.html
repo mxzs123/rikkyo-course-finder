@@ -721,7 +721,7 @@
 <div class="header">
   <div>
     <h1>立教大学 履修サーチ</h1>
-    <div class="subtitle">Rikkyo Course Finder - Better Search for Syllabus</div>
+    <div class="subtitle">Rikkyo Course Finder · {{ default_nendo }}年度シラバス検索</div>
   </div>
   <div class="header-links">
     <a href="https://github.com/mxzs123/rikkyo-course-finder" target="_blank" rel="noopener" title="GitHub Repository">
@@ -740,10 +740,9 @@
       <div class="field">
         <label>年度</label>
         <select id="nendo">
-          <option value="2025" selected>2025</option>
-          <option value="2024">2024</option>
-          <option value="2023">2023</option>
-          <option value="2022">2022</option>
+          {% for y in [2026, 2025, 2024, 2023, 2022] %}
+          <option value="{{ y }}"{% if y|string == default_nendo %} selected{% endif %}>{{ y }}</option>
+          {% endfor %}
         </select>
       </div>
       <div class="field">
@@ -928,6 +927,7 @@
 </div>
 
 <script>
+const DEFAULT_NENDO = "{{ default_nendo }}";
 const DAYS = ["月", "火", "水", "木", "金", "土"];
 const PERIODS = ["1", "2", "3", "4", "5", "6"];
 const PAGE_SIZE = 20;
@@ -1040,7 +1040,12 @@ function getBaseSearchParams() {
   const params = new URLSearchParams();
   fields.forEach(field => {
     const el = document.getElementById(field);
-    if (el && el.value) params.set(field, el.value);
+    if (!el) return;
+    if (field === "nendo") {
+      params.set(field, el.value || DEFAULT_NENDO);
+      return;
+    }
+    if (el.value) params.set(field, el.value);
   });
   return params;
 }

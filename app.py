@@ -11,6 +11,9 @@ from sentry_sdk.integrations.flask import FlaskIntegration
 
 app = Flask(__name__)
 
+# Default 年度 for Web UI (override with env DEFAULT_NENDO e.g. on Railway)
+DEFAULT_NENDO = os.environ.get("DEFAULT_NENDO", "2026")
+
 
 def _get_float_env(name, default):
     raw = os.environ.get(name)
@@ -66,6 +69,7 @@ def index():
         bunrui12_map=BUNRUI12_MAP,
         bunrui2_map=BUNRUI2_MAP,
         cloudflare_web_analytics_token=cloudflare_web_analytics_token,
+        default_nendo=DEFAULT_NENDO,
     )
 
 
